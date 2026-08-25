@@ -31,6 +31,12 @@ rustup target add wasm32-unknown-unknown
 npm run build
 ```
 
+Node-only deployment builders automatically validate and reuse the checked-in
+`wasm/slm_core.wasm` artifact when Cargo is unavailable. Run
+`npm run build:wasm:prebuilt` to exercise that path locally. After changing the
+Rust crate, run `npm run build:wasm` in a Rust-capable environment and commit
+both the refreshed Wasm artifact and generated TypeScript byte module.
+
 The browser workspace includes a snapping visual coordinate editor for adding,
 moving, inspecting, and removing initial atoms and target sites. Every visual
 change is reflected in the JSON inputs, which remain available for direct edits

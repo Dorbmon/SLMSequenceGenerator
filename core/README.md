@@ -12,3 +12,7 @@ invoke them once per stage; the reference DFT invokes them once per output.
 Run `npm run build:wasm` from the repository root to compile the crate, validate
 the imports and exports, generate `wasm/slm_core.wasm`, and refresh the embedded
 TypeScript byte module.
+
+For Node-only deployment environments, `npm run build:wasm:prebuilt` validates
+the checked-in Wasm artifact and refreshes the embedded module without invoking
+Cargo.

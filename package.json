@@ -18,6 +18,7 @@
   ],
   "scripts": {
     "build:wasm": "node scripts/build-wasm.mjs",
+    "build:wasm:prebuilt": "node scripts/build-wasm.mjs --prebuilt",
     "build:lib": "tsc -p tsconfig.json",
     "build": "npm run build:wasm && npm run build:lib && vite build",
     "test": "npm run build:wasm && npm run build:lib && node --test test/*.test.js && vitest run",

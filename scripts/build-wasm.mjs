@@ -1,6 +1,6 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -16,14 +16,33 @@ const compiledWasm = resolve(
 );
 const publicWasm = resolve(projectRoot, "wasm", "slm_core.wasm");
 const generatedModule = resolve(projectRoot, "src", "wasm-binary.ts");
+const forcePrebuilt = process.argv.includes("--prebuilt");
 
-execFileSync(
-  "cargo",
-  ["build", "--locked", "--manifest-path", manifest, "--target", "wasm32-unknown-unknown", "--release"],
-  { cwd: projectRoot, stdio: "inherit" },
-);
+const cargoProbe = forcePrebuilt
+  ? null
+  : spawnSync("cargo", ["--version"], { cwd: projectRoot, stdio: "ignore" });
+const cargoAvailable = cargoProbe !== null && cargoProbe.status === 0 && !cargoProbe.error;
 
-const bytes = readFileSync(compiledWasm);
+let wasmSource = publicWasm;
+if (cargoAvailable) {
+  execFileSync(
+    "cargo",
+    ["build", "--locked", "--manifest-path", manifest, "--target", "wasm32-unknown-unknown", "--release"],
+    { cwd: projectRoot, stdio: "inherit" },
+  );
+  wasmSource = compiledWasm;
+} else {
+  if (!existsSync(publicWasm)) {
+    const reason = forcePrebuilt ? "prebuilt mode was requested" : "Cargo is unavailable";
+    throw new Error(
+      `${reason}, but ${publicWasm} is missing. Build and commit the Wasm artifact from a Rust-capable environment.`,
+    );
+  }
+  const reason = forcePrebuilt ? "Prebuilt mode requested" : "Cargo unavailable";
+  console.warn(`[wasm] ${reason}; validating the checked-in wasm/slm_core.wasm artifact.`);
+}
+
+const bytes = readFileSync(wasmSource);
 const module = new WebAssembly.Module(bytes);
 const exports = new Set(WebAssembly.Module.exports(module).map((entry) => entry.name));
 const requiredExports = [
