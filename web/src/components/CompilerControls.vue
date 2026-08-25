@@ -70,7 +70,7 @@ function dimensionFromEvent(event: Event, fallback: number): number {
   <section class="controls panel" aria-labelledby="controls-title">
     <div class="panel-bar">
       <span class="panel-kicker">INPUT / OUTPUT</span>
-      <span class="valid-badge">{{ badge }}</span>
+      <span class="valid-badge" :class="{ 'is-warning': badge === 'WARNINGS', 'is-rejected': badge === 'REJECTED' }">{{ badge }}</span>
     </div>
     <h2 id="controls-title">Compiler controls</h2>
     <p class="control-description">Set the safety margin and solver budget, then compile the complete offline sequence.</p>

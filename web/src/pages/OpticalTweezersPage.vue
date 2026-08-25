@@ -31,7 +31,7 @@ import type {
 } from "../workers/compiler-messages.js";
 
 type JsonStatus = "synced" | "dirty" | "invalid";
-type OutputState = "idle" | "running" | "accepted" | "rejected" | "cancelled";
+type OutputState = "idle" | "running" | "accepted" | "warning" | "rejected" | "cancelled";
 
 interface TargetImageImporterHandle {
   reset(): void;
@@ -57,6 +57,7 @@ const outputPixels = shallowRef<Uint8Array | Uint16Array | null>(null);
 const metrics = shallowRef<FrameMetrics | null>(null);
 const elapsedMs = ref<number | null>(null);
 const errorMessage = ref("");
+const qualityWarning = ref("");
 const checksum = ref<number | null>(null);
 const resultBackendId = ref("wasm-fft-phase-locked-wgs");
 let suppressTableSync = false;
@@ -70,6 +71,7 @@ const fftHeight = computed(() => fftDimensionFor(slmHeight.value));
 const phaseStatus = computed(() => {
   if (running.value) return computeBackend.value === "webgpu" ? "SOLVING / WEBGPU WGS" : "SOLVING / WASM WGS";
   if (outputState.value === "accepted") return "FRAME ACCEPTED";
+  if (outputState.value === "warning") return "FRAME READY / NOT CONVERGED";
   if (outputState.value === "rejected") return "GENERATION REJECTED";
   if (outputState.value === "cancelled") return "GENERATION CANCELLED";
   return "AWAITING TWEEZER INPUT";
@@ -127,6 +129,7 @@ function invalidateOutput(): void {
   checksum.value = null;
   outputState.value = "idle";
   errorMessage.value = "";
+  qualityWarning.value = "";
 }
 
 function markJsonDirty(): void {
@@ -222,6 +225,7 @@ function reset(): void {
   checksum.value = null;
   resultBackendId.value = "wasm-fft-phase-locked-wgs";
   errorMessage.value = "";
+  qualityWarning.value = "";
   nextTick(() => {
     suppressTableSync = false;
     targetImageImporter.value?.reset();
@@ -298,6 +302,7 @@ function generateFrame(): void {
   elapsedMs.value = 0;
   checksum.value = null;
   errorMessage.value = "";
+  qualityWarning.value = "";
   startElapsedClock();
 
   const worker = new Worker(new URL("../workers/compiler.worker.ts", import.meta.url), { type: "module" });
@@ -315,8 +320,14 @@ function generateFrame(): void {
     elapsedMs.value = response.elapsedMs;
     checksum.value = response.checksum;
     resultBackendId.value = response.backendId;
-    outputState.value = response.metrics.accepted ? "accepted" : "rejected";
-    if (!response.metrics.accepted) errorMessage.value = "The generated frame did not pass the numerical quality checks";
+    outputState.value = !response.metrics.accepted
+      ? "rejected"
+      : response.metrics.converged ? "accepted" : "warning";
+    if (!response.metrics.accepted) {
+      errorMessage.value = "The generated frame did not pass the numerical quality checks";
+    } else if (!response.metrics.converged) {
+      qualityWarning.value = "The WGS iteration budget ended before convergence. The frame is exportable, but its optical quality is not certified; review the metrics before use.";
+    }
     running.value = false;
     stopElapsedClock(response.elapsedMs);
     disposeFrameWorker(worker);
@@ -361,6 +372,7 @@ function cancelGeneration(): void {
   metrics.value = null;
   checksum.value = null;
   errorMessage.value = "";
+  qualityWarning.value = "";
 }
 
 function startElapsedClock(): void {
@@ -586,7 +598,7 @@ defineExpose({ reset });
         <section class="panel tweezer-generator" aria-labelledby="frame-generator-title">
           <div class="panel-bar">
             <span id="frame-generator-title" class="panel-kicker">FRAME GENERATOR</span>
-            <span class="valid-badge">{{ outputState.toUpperCase() }}</span>
+            <span class="valid-badge" :class="{ 'is-warning': outputState === 'warning', 'is-rejected': outputState === 'rejected' }">{{ outputState.toUpperCase() }}</span>
           </div>
           <div class="tweezer-generator-body">
             <div class="resolution-block">
@@ -622,6 +634,7 @@ defineExpose({ reset });
               :progress="null"
             />
             <p v-if="errorMessage" class="tweezer-error" role="alert">{{ errorMessage }}</p>
+            <p v-else-if="qualityWarning" class="tweezer-warning" role="status">{{ qualityWarning }}</p>
             <button class="compile-button tweezer-generate-button" :class="{ 'is-running': running }" type="button" @click="running ? cancelGeneration() : generateFrame()">
               <span></span>{{ running ? "Cancel generation" : "Generate SLM frame" }}
             </button>

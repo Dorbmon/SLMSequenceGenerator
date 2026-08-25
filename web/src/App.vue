@@ -41,7 +41,7 @@ interface LogLine {
   state?: "active" | "done";
 }
 
-type CompilationState = "idle" | "running" | "accepted" | "rejected";
+type CompilationState = "idle" | "running" | "accepted" | "warning" | "rejected";
 
 const coordinateEditor = ref<CoordinateEditorHandle | null>(null);
 const opticalTweezersPage = ref<OpticalTweezersPageHandle | null>(null);
@@ -78,6 +78,7 @@ let compileStarted = 0;
 const badge = computed(() => {
   if (running.value) return "PROCESSING";
   if (compilationState.value === "rejected") return "REJECTED";
+  if (compilationState.value === "warning") return "WARNINGS";
   if (inputError.value) return "CHECK INPUT";
   if (sequence.value) return "ACCEPTED";
   return "VALIDATED";
@@ -85,6 +86,7 @@ const badge = computed(() => {
 
 const canvasState = computed(() => {
   if (running.value) return "SOLVING / SEQUENTIAL";
+  if (compilationState.value === "warning") return "SEQUENCE READY / CHECK WARNINGS";
   if (sequence.value) return "SEQUENCE ACCEPTED";
   return "READY";
 });
@@ -269,13 +271,15 @@ function compileSequence(): void {
     frames.value = response.sequence.trapFrames;
     total.value = frames.value.length;
     frame.value = 0;
-    compilationState.value = "accepted";
+    const warningCount = compiled.validation.warnings.length;
+    compilationState.value = warningCount > 0 ? "warning" : "accepted";
     running.value = false;
     compileProgress.value = 1;
-    compileProgressLabel.value = "COMPLETE";
+    compileProgressLabel.value = warningCount > 0 ? `COMPLETE / ${warningCount} WARNINGS` : "COMPLETE";
     stopCompileClock(response.elapsedMs);
     setLog(1, "Conflict-free route accepted", "done");
-    setLog(2, `${total.value} calibrated frames accepted`, "done");
+    if (warningCount > 0) setLog(2, `${total.value} frames generated / ${warningCount} validation warnings`);
+    else setLog(2, `${total.value} calibrated frames accepted`, "done");
     disposeCompilationWorker(worker);
     startPlayback();
   };

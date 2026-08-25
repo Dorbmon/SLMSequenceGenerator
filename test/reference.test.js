@@ -183,6 +183,43 @@ test("generates a direct phase-locked optical tweezer frame", () => {
   assert.ok(result.metrics.maximumTargetPhaseErrorRad < 0.2);
 });
 
+test("uses a seeded stable phase when the initial target superposition cancels", () => {
+  const symmetricCalibration = calibration(64, 64);
+  symmetricCalibration.coordinateTransform = {
+    originXUm: 32,
+    originYUm: 32,
+    scaleX: 6.4,
+    scaleY: 6.4,
+  };
+  const frame = {
+    frameIndex: 0,
+    timeUs: 0,
+    traps: [
+      { trapId: 1, atomId: null, xUm: -4, yUm: -4, intensity: 1, targetPhaseRad: 0, flags: 0 },
+      { trapId: 2, atomId: null, xUm: 4, yUm: -4, intensity: 1, targetPhaseRad: Math.PI / 2, flags: 0 },
+      { trapId: 3, atomId: null, xUm: -4, yUm: 4, intensity: 1, targetPhaseRad: Math.PI, flags: 0 },
+      { trapId: 4, atomId: null, xUm: 4, yUm: 4, intensity: 1, targetPhaseRad: -Math.PI / 2, flags: 0 },
+    ],
+  };
+  const solve = (deterministicSeed) => new SequentialWgsSolver(symmetricCalibration, {
+    width: 64,
+    height: 64,
+    firstFrameIterations: 1,
+    maxIterations: 1,
+    targetPhaseMode: "PHASE_LOCKED_WGS",
+    backgroundPolicy: "ZERO",
+    deterministicSeed,
+    requireConvergence: false,
+  }).solveSequentialFrame(frame);
+
+  const first = solve(7);
+  const repeated = solve(7);
+  const differentSeed = solve(19);
+  assert.deepEqual(first.pixels, repeated.pixels);
+  assert.notDeepEqual(first.pixels, differentSeed.pixels);
+  assert.equal(first.metrics.numericalValid, true);
+});
+
 test("routes a constrained crossing without collision", async () => {
   const options = compilerOptions();
   options.planner = { minimumSeparationUm: 1, geometricMarginUm: 0.1, gridResolutionUm: 1, maxSearchTicks: 100, maxCbsNodes: 2000 };

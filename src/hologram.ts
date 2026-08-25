@@ -18,6 +18,11 @@ import type {
 } from "./types.js";
 import { angularDistance, clamp, crc32, TAU, wrapPhase } from "./util.js";
 
+// A coherent sum below this fraction has no numerically meaningful phase.
+// Both CPU and GPU use the same seeded fallback so float precision cannot send
+// the non-convex solver into unrelated solutions at destructive cancellations.
+export const WGS_INITIALIZATION_CANCELLATION_RATIO = 1e-3;
+
 interface SolverState {
   phase: Float64Array;
   weights: Map<number, number>;
@@ -241,18 +246,31 @@ export class SequentialWgsSolver {
   private initializeSuperposition(frame: TrapFrame): Float64Array {
     const phase = new Float64Array(this.width * this.height);
     if (frame.traps.length === 0) return phase;
+    const targets = frame.traps.map((trap) => ({
+      mapped: this.mapCoordinate(trap),
+      amplitude: Math.sqrt(Math.max(0, trap.intensity)),
+      phase: trap.targetPhaseRad,
+    }));
+    const coherentAmplitude = targets.reduce((sum, target) => sum + target.amplitude, 0);
+    const cancellationThreshold = Math.max(
+      this.config.epsilon,
+      coherentAmplitude * WGS_INITIALIZATION_CANCELLATION_RATIO,
+    );
     for (let y = 0; y < this.height; y += 1) {
       for (let x = 0; x < this.width; x += 1) {
         let real = 0;
         let imag = 0;
-        for (const trap of frame.traps) {
-          const mapped = this.mapCoordinate(trap);
-          const amplitude = Math.sqrt(Math.max(0, trap.intensity));
-          const angle = TAU * (mapped.x * x / this.width + mapped.y * y / this.height) + trap.targetPhaseRad;
-          real += amplitude * Math.cos(angle);
-          imag += amplitude * Math.sin(angle);
+        for (const target of targets) {
+          const cycles = wrappedDftCycles(target.mapped.x, x, this.width)
+            + wrappedDftCycles(target.mapped.y, y, this.height);
+          const angle = wrapPhase(TAU * cycles + target.phase);
+          real += target.amplitude * Math.cos(angle);
+          imag += target.amplitude * Math.sin(angle);
         }
-        phase[y * this.width + x] = Math.atan2(imag, real);
+        const index = y * this.width + x;
+        phase[index] = Math.hypot(real, imag) <= cancellationThreshold
+          ? deterministicInitializationPhase(index, this.config.deterministicSeed)
+          : Math.atan2(imag, real);
       }
     }
     return phase;
@@ -645,6 +663,21 @@ function meanOf(values: number[]): number {
 
 function standardDeviation(values: number[], mean: number): number {
   return values.length === 0 ? 0 : Math.sqrt(values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length);
+}
+
+function wrappedDftCycles(position: number, coordinate: number, extent: number): number {
+  const integral = Math.floor(position);
+  const modular = ((integral * coordinate) % extent + extent) % extent;
+  const fractional = position - integral;
+  return (modular + fractional * coordinate) / extent;
+}
+
+function deterministicInitializationPhase(index: number, seed: number): number {
+  let value = (((index >>> 0) ^ (seed >>> 0)) + 1) >>> 0;
+  value = Math.imul(value ^ (value >>> 16), 0x7feb352d) >>> 0;
+  value = Math.imul(value ^ (value >>> 15), 0x846ca68b) >>> 0;
+  value = (value ^ (value >>> 16)) >>> 0;
+  return (value >>> 8) / 0x1000000 * TAU - Math.PI;
 }
 
 function nowMs(): number {

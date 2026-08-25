@@ -70,6 +70,10 @@ phase field, radix-2 FFT intermediates, WGS weights, phase constraints,
 quantization, and accepted sequential state in GPU buffers across iterations;
 only the final cropped frame and compact metrics are read back. WebGPU support
 is checked inside the same dedicated worker that performs the computation.
+Wasm and WebGPU use the same range-reduced, seeded initialization when target
+phasors destructively cancel, preventing precision-dependent solver branches.
+Frames that exhaust their WGS budget remain exportable but are shown as a
+non-convergence warning instead of a verified acceptance.
 
 SLM output defaults to 1272×1024 pixels. Width and height can be changed from
 the compiler controls before a run; exported frame dimensions follow those

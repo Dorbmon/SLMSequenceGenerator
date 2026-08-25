@@ -9,6 +9,7 @@ import {
   type SequentialHologramBackend,
   type TrapFrame,
   type TrapState,
+  WGS_INITIALIZATION_CANCELLATION_RATIO,
   wrapPhase,
 } from "../../../src/index.js";
 
@@ -146,7 +147,7 @@ export class WebGpuSequentialWgsSolver implements SequentialHologramBackend {
     const complexBytes = this.pixelCount * 8;
     const targetBytes = MAX_TARGETS * TARGET_STRIDE;
     this.buffers = {
-      frameParams: device.createBuffer({ label: "WGS frame parameters", size: 80, usage: GPUBufferUsage.UNIFORM | copyDestination }),
+      frameParams: device.createBuffer({ label: "WGS frame parameters", size: 96, usage: GPUBufferUsage.UNIFORM | copyDestination }),
       targetInput: device.createBuffer({ label: "WGS target inputs", size: targetBytes, usage: storage | copySource | copyDestination }),
       targetState: device.createBuffer({ label: "WGS target state", size: targetBytes, usage: storage | copySource | copyDestination }),
       acceptedTargetInput: device.createBuffer({ label: "WGS accepted target inputs", size: targetBytes, usage: storage | copySource | copyDestination }),
@@ -512,7 +513,7 @@ export class WebGpuSequentialWgsSolver implements SequentialHologramBackend {
   }
 
   private serializeFrameParameters(targetCount: number): ArrayBuffer {
-    const output = new ArrayBuffer(80);
+    const output = new ArrayBuffer(96);
     const view = new DataView(output);
     const { activeWidth, activeHeight } = this.calibration.manifest;
     const xStart = Math.floor((this.width - activeWidth) / 2);
@@ -546,6 +547,7 @@ export class WebGpuSequentialWgsSolver implements SequentialHologramBackend {
     view.setUint32(68, INVERSE_LUT_SIZE, true);
     view.setUint32(72, this.config.format === "UINT8" ? 256 : 65536, true);
     view.setUint32(76, this.partialCount, true);
+    view.setUint32(80, this.config.deterministicSeed >>> 0, true);
     return output;
   }
 
@@ -1131,6 +1133,10 @@ struct FrameParameters {
   inverseLutSize: u32,
   decodeLutSize: u32,
   partialCount: u32,
+  deterministicSeed: u32,
+  padding0: u32,
+  padding1: u32,
+  padding2: u32,
 }
 
 struct TargetInput {
@@ -1180,6 +1186,23 @@ var<workgroup> reductionCode: array<f32, ${WORKGROUP_SIZE}>;
 fn wrap_phase(value: f32) -> f32 {
   let shifted = value + PI;
   return shifted - floor(shifted / TAU) * TAU - PI;
+}
+
+fn wrapped_dft_cycles(position: f32, coordinate: u32, extent: u32) -> f32 {
+  let integral = i32(floor(position));
+  let signedExtent = i32(extent);
+  let product = integral * i32(coordinate);
+  let modular = ((product % signedExtent) + signedExtent) % signedExtent;
+  let fractional = position - f32(integral);
+  return (f32(modular) + fractional * f32(coordinate)) / f32(extent);
+}
+
+fn initialization_phase(index: u32) -> f32 {
+  var value = (index ^ params.deterministicSeed) + 1u;
+  value = (value ^ (value >> 16u)) * 0x7feb352du;
+  value = (value ^ (value >> 15u)) * 0x846ca68bu;
+  value = value ^ (value >> 16u);
+  return f32(value >> 8u) / 16777216.0 * TAU - PI;
 }
 
 fn clamped_index(x: i32, y: i32) -> u32 {
@@ -1232,15 +1255,18 @@ fn initialize_phase(@builtin(global_invocation_id) gid: vec3<u32>) {
     phase[index] = acceptedPhase[index];
     return;
   }
-  let x = f32(index % params.width);
-  let y = f32(index / params.width);
   var sum = vec2<f32>(0.0);
+  var coherentAmplitude = 0.0;
   for (var targetIndex = 0u; targetIndex < params.targetCount; targetIndex = targetIndex + 1u) {
     let item = targetInputs[targetIndex];
-    let angle = TAU * (item.position.x * x / f32(params.width) + item.position.y * y / f32(params.height)) + item.inputPhase;
+    let cycles = wrapped_dft_cycles(item.position.x, index % params.width, params.width)
+      + wrapped_dft_cycles(item.position.y, index / params.width, params.height);
+    let angle = wrap_phase(TAU * cycles + item.inputPhase);
     sum = sum + item.desired * vec2<f32>(cos(angle), sin(angle));
+    coherentAmplitude = coherentAmplitude + item.desired;
   }
-  phase[index] = atan2(sum.y, sum.x);
+  let cancellationThreshold = max(params.epsilon, coherentAmplitude * ${WGS_INITIALIZATION_CANCELLATION_RATIO});
+  phase[index] = select(atan2(sum.y, sum.x), initialization_phase(index), length(sum) <= cancellationThreshold);
 }
 
 @compute @workgroup_size(${WORKGROUP_SIZE})
