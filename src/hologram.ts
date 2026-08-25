@@ -217,7 +217,7 @@ export class SequentialWgsSolver {
     };
     metrics.accepted = passesQualityGates(metrics, this.config.qualityGates) &&
       (!this.config.requireConvergence || metrics.converged);
-    return { pixels: new (codes.constructor as { new (source: Uint8Array | Uint16Array): Uint8Array | Uint16Array })(codes), metrics };
+    return { pixels: this.extractActiveCodes(codes), metrics };
   }
 
   commitFrameState(): void {
@@ -285,11 +285,12 @@ export class SequentialWgsSolver {
     fallback: number,
     activePixels: number,
   ): number {
-    if (value === undefined || typeof value === "number") return typeof value === "number" ? value : fallback;
+    if (value === undefined || typeof value === "number") {
+      return this.isActivePixel(x, y) ? (typeof value === "number" ? value : fallback) : 0;
+    }
     if (value.length === this.width * this.height) return value[index] ?? fallback;
     if (value.length === activePixels) {
-      const xStart = Math.floor((this.width - this.calibration.manifest.activeWidth) / 2);
-      const yStart = Math.floor((this.height - this.calibration.manifest.activeHeight) / 2);
+      const { xStart, yStart } = this.activeOrigin();
       if (x < xStart || y < yStart || x >= xStart + this.calibration.manifest.activeWidth || y >= yStart + this.calibration.manifest.activeHeight) {
         return 0;
       }
@@ -297,6 +298,35 @@ export class SequentialWgsSolver {
       return value[activeIndex] ?? fallback;
     }
     return fallback;
+  }
+
+  private activeOrigin(): { xStart: number; yStart: number } {
+    return {
+      xStart: Math.floor((this.width - this.calibration.manifest.activeWidth) / 2),
+      yStart: Math.floor((this.height - this.calibration.manifest.activeHeight) / 2),
+    };
+  }
+
+  private isActivePixel(x: number, y: number): boolean {
+    const { activeWidth, activeHeight } = this.calibration.manifest;
+    const { xStart, yStart } = this.activeOrigin();
+    return x >= xStart && y >= yStart && x < xStart + activeWidth && y < yStart + activeHeight;
+  }
+
+  private extractActiveCodes(codes: Uint8Array | Uint16Array): Uint8Array | Uint16Array {
+    const { activeWidth, activeHeight } = this.calibration.manifest;
+    const Output = codes.constructor as {
+      new(length: number): Uint8Array | Uint16Array;
+      new(source: Uint8Array | Uint16Array): Uint8Array | Uint16Array;
+    };
+    if (activeWidth === this.width && activeHeight === this.height) return new Output(codes);
+    const output = new Output(activeWidth * activeHeight);
+    const { xStart, yStart } = this.activeOrigin();
+    for (let y = 0; y < activeHeight; y += 1) {
+      const sourceStart = (yStart + y) * this.width + xStart;
+      output.set(codes.subarray(sourceStart, sourceStart + activeWidth), y * activeWidth);
+    }
+    return output;
   }
 
   private mapCoordinate(trap: TrapState): { x: number; y: number } {

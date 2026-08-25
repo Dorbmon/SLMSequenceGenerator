@@ -14,6 +14,12 @@ import CompilerControls from "./components/CompilerControls.vue";
 import CoordinateWorkspace from "./components/CoordinateWorkspace.vue";
 import { DEFAULT_INITIAL_ATOMS, DEFAULT_TARGET_SITES } from "./data/defaults.js";
 import { cloneAtoms, cloneTargets } from "./lib/coordinates.js";
+import {
+  DEFAULT_SLM_HEIGHT,
+  DEFAULT_SLM_WIDTH,
+  fftDimensionFor,
+  normalizeSlmDimension,
+} from "./lib/resolution.js";
 
 interface CoordinateEditorHandle {
   applyDraft(options?: { fitView?: boolean }): boolean;
@@ -36,6 +42,8 @@ const frame = ref(0);
 const total = ref(64);
 const separation = ref(1.2);
 const iterations = ref(4);
+const slmWidth = ref(DEFAULT_SLM_WIDTH);
+const slmHeight = ref(DEFAULT_SLM_HEIGHT);
 const phaseMode = ref("Phase locked WGS");
 const running = ref(false);
 const compilationState = ref<CompilationState>("idle");
@@ -71,6 +79,8 @@ const metricClearance = computed(() => {
 });
 
 const metricCost = computed(() => sequence.value?.manifest.assignmentCost.toFixed(1) ?? "--");
+const fftWidth = computed(() => fftDimensionFor(slmWidth.value));
+const fftHeight = computed(() => fftDimensionFor(slmHeight.value));
 
 function defaultLogs(): LogLine[] {
   return [
@@ -91,7 +101,7 @@ function stopPlayback(): void {
   playbackFrame = 0;
 }
 
-function invalidateSequence(): void {
+function invalidateSequence(message = "Compiler settings changed"): void {
   stopPlayback();
   sequence.value = null;
   frames.value = [];
@@ -99,7 +109,7 @@ function invalidateSequence(): void {
   total.value = 64;
   compilationState.value = "idle";
   logs.value = [
-    { text: "Coordinates changed" },
+    { text: message },
     { text: "Compile to validate paths" },
     { text: "Hologram state is idle" },
   ];
@@ -109,7 +119,7 @@ function updateCoordinates(nextAtoms: InitialAtom[], nextTargets: TargetSite[]):
   initialAtoms.value = cloneAtoms(nextAtoms);
   targetSites.value = cloneTargets(nextTargets);
   inputError.value = "";
-  invalidateSequence();
+  invalidateSequence("Coordinates changed");
 }
 
 function updateSeparation(value: number): void {
@@ -122,6 +132,26 @@ function updateIterations(value: number): void {
   invalidateSequence();
 }
 
+function updateSlmWidth(value: number): void {
+  try {
+    slmWidth.value = normalizeSlmDimension(value, "SLM width");
+    inputError.value = "";
+    invalidateSequence("SLM resolution changed");
+  } catch (error) {
+    inputError.value = error instanceof Error ? error.message : "Invalid SLM width";
+  }
+}
+
+function updateSlmHeight(value: number): void {
+  try {
+    slmHeight.value = normalizeSlmDimension(value, "SLM height");
+    inputError.value = "";
+    invalidateSequence("SLM resolution changed");
+  } catch (error) {
+    inputError.value = error instanceof Error ? error.message : "Invalid SLM height";
+  }
+}
+
 function updatePhaseMode(value: string): void {
   phaseMode.value = value;
   invalidateSequence();
@@ -129,19 +159,24 @@ function updatePhaseMode(value: string): void {
 
 function simulationCalibration(): CalibrationPackage {
   const points = [...initialAtoms.value, ...targetSites.value];
-  const maximumCoordinate = Math.max(1, ...points.flatMap((point) => [Math.abs(point.xUm), Math.abs(point.yUm)]));
-  const scale = 14 / maximumCoordinate;
+  const maximumX = Math.max(1, ...points.map((point) => Math.abs(point.xUm)));
+  const maximumY = Math.max(1, ...points.map((point) => Math.abs(point.yUm)));
   return {
     manifest: {
       calibrationId: "browser-simulation",
       wavelengthNm: 1,
-      activeWidth: 32,
-      activeHeight: 32,
-      fftWidth: 32,
-      fftHeight: 32,
+      activeWidth: slmWidth.value,
+      activeHeight: slmHeight.value,
+      fftWidth: fftWidth.value,
+      fftHeight: fftHeight.value,
       coordinateConvention: "+x right, +y up",
     },
-    coordinateTransform: { originXUm: 16, originYUm: 16, scaleX: scale, scaleY: scale },
+    coordinateTransform: {
+      originXUm: fftWidth.value / 2,
+      originYUm: fftHeight.value / 2,
+      scaleX: fftWidth.value * 0.4 / maximumX,
+      scaleY: fftHeight.value * 0.4 / maximumY,
+    },
   };
 }
 
@@ -167,8 +202,8 @@ async function compileSequence(): Promise<void> {
       simulationMode: true,
       calibration: simulationCalibration(),
       hologram: {
-        width: 32,
-        height: 32,
+        width: fftWidth.value,
+        height: fftHeight.value,
         format: "UINT8",
         firstFrameIterations: iterations.value,
         subsequentFrameIterations: iterations.value,
@@ -301,6 +336,8 @@ function reset(): void {
   targetSites.value = cloneTargets(DEFAULT_TARGET_SITES);
   separation.value = 1.2;
   iterations.value = 4;
+  slmWidth.value = DEFAULT_SLM_WIDTH;
+  slmHeight.value = DEFAULT_SLM_HEIGHT;
   phaseMode.value = "Phase locked WGS";
   inputError.value = "";
   sequence.value = null;
@@ -351,6 +388,10 @@ onBeforeUnmount(() => {
         <CompilerControls
           :separation="separation"
           :iterations="iterations"
+          :slm-width="slmWidth"
+          :slm-height="slmHeight"
+          :fft-width="fftWidth"
+          :fft-height="fftHeight"
           :phase-mode="phaseMode"
           :badge="badge"
           :running="running"
@@ -358,6 +399,8 @@ onBeforeUnmount(() => {
           :logs="logs"
           @update:separation="updateSeparation"
           @update:iterations="updateIterations"
+          @update:slm-width="updateSlmWidth"
+          @update:slm-height="updateSlmHeight"
           @update:phase-mode="updatePhaseMode"
           @compile="compileSequence"
           @step="stepFrame"

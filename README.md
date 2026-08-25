@@ -42,6 +42,11 @@ moving, inspecting, and removing initial atoms and target sites. Every visual
 change is reflected in the JSON inputs, which remain available for direct edits
 and imports.
 
+SLM output defaults to 1272×1024 pixels. Width and height can be changed from
+the compiler controls before a run; exported frame dimensions follow those
+values. Non-power-of-two dimensions are centered on a zero-padded power-of-two
+FFT grid and cropped back to the selected active SLM area for export.
+
 The workspace is a Vue 3 single-page application built with Vite. Run it locally
 with `npm run dev`, create the production site in `web-dist/` with
 `npm run build:web`, or inspect that production build with `npm run preview`.

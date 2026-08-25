@@ -159,8 +159,8 @@ export class SlmSequenceCompiler {
       const descriptor = frameDescriptor(
         frame,
         solve.pixels,
-        normalized.hologramConfig.width,
-        normalized.hologramConfig.height,
+        normalized.calibration.manifest.activeWidth,
+        normalized.calibration.manifest.activeHeight,
         normalized.hologramConfig.format,
         byteOffset,
       );
@@ -246,7 +246,7 @@ export class SlmSequenceCompiler {
       trapFrameStore.append(frame);
       slmFrameStore.append(result.pixels);
       solver.commitFrameState();
-      const descriptor = frameDescriptor(frame, result.pixels, normalized.hologramConfig.width, normalized.hologramConfig.height, normalized.hologramConfig.format, byteOffset);
+      const descriptor = frameDescriptor(frame, result.pixels, calibration.manifest.activeWidth, calibration.manifest.activeHeight, normalized.hologramConfig.format, byteOffset);
       byteOffset += BigInt(descriptor.byteLength);
       descriptors.push(descriptor);
       frameMetrics.push(result.metrics);
@@ -276,11 +276,13 @@ export class SlmSequenceCompiler {
         targetPhaseMode: normalized.hologramConfig.targetPhaseMode,
         firstFrameIterations: normalized.hologramConfig.firstFrameIterations,
         subsequentFrameIterations: normalized.hologramConfig.subsequentFrameIterations,
+        fftWidth: normalized.hologramConfig.width,
+        fftHeight: normalized.hologramConfig.height,
         gamma: normalized.hologramConfig.gamma,
         epsilon: normalized.hologramConfig.epsilon,
       },
-      outputWidth: normalized.hologramConfig.width,
-      outputHeight: normalized.hologramConfig.height,
+      outputWidth: calibration.manifest.activeWidth,
+      outputHeight: calibration.manifest.activeHeight,
       pixelFormat: normalized.hologramConfig.format,
       deterministicSeed: normalized.hologramConfig.deterministicSeed,
       checksums: {
@@ -410,11 +412,13 @@ function makeManifest(
       targetPhaseMode: normalized.hologramConfig.targetPhaseMode,
       firstFrameIterations: normalized.hologramConfig.firstFrameIterations,
       subsequentFrameIterations: normalized.hologramConfig.subsequentFrameIterations,
+      fftWidth: normalized.hologramConfig.width,
+      fftHeight: normalized.hologramConfig.height,
       gamma: normalized.hologramConfig.gamma,
       epsilon: normalized.hologramConfig.epsilon,
     },
-    outputWidth: normalized.hologramConfig.width,
-    outputHeight: normalized.hologramConfig.height,
+    outputWidth: normalized.calibration.manifest.activeWidth,
+    outputHeight: normalized.calibration.manifest.activeHeight,
     pixelFormat: normalized.hologramConfig.format,
     deterministicSeed: normalized.hologramConfig.deterministicSeed,
     checksums: {

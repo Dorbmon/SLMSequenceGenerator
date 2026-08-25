@@ -104,6 +104,28 @@ test("compiles an identity sequence and exports checksummed frames", async () =>
   assert.ok(packageFiles["slm-frames.bin"].length > 0);
 });
 
+test("crops a padded FFT grid to the active SLM resolution", async () => {
+  const options = compilerOptions();
+  options.calibration = calibration(8, 8);
+  options.calibration.manifest.activeWidth = 6;
+  options.calibration.manifest.activeHeight = 4;
+  const compiler = await SlmSequenceCompiler.create(options);
+  const sequence = await compiler.compileRearrangement({
+    initialAtoms: [{ atomId: 1, xUm: 0, yUm: 0 }],
+    targetSites: [{ siteId: 2, xUm: 0, yUm: 0 }],
+    calibrationId: "test-calibration",
+  });
+  const frames = sequence.slmFrameStore.toArray();
+  assert.equal(sequence.manifest.outputWidth, 6);
+  assert.equal(sequence.manifest.outputHeight, 4);
+  assert.equal(sequence.manifest.wgsParameters.fftWidth, 8);
+  assert.equal(sequence.manifest.wgsParameters.fftHeight, 8);
+  assert.ok(frames.every((frame) => frame.length === 24));
+  assert.ok(sequence.slmFrameDescriptors.every((descriptor) => descriptor.width === 6 && descriptor.height === 4));
+  assert.equal(createSequencePackage(sequence)["slm-frames.bin"].length, frames.length * 24);
+  assert.equal(verifySequencePackage(sequence).valid, true);
+});
+
 test("routes a constrained crossing without collision", async () => {
   const options = compilerOptions();
   options.planner = { minimumSeparationUm: 1, geometricMarginUm: 0.1, gridResolutionUm: 1, maxSearchTicks: 100, maxCbsNodes: 2000 };

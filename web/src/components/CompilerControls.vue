@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { MAX_SLM_DIMENSION, MIN_SLM_DIMENSION } from "../lib/resolution.js";
+
 interface CompilerLogLine {
   text: string;
   state?: "active" | "done";
@@ -7,6 +9,10 @@ interface CompilerLogLine {
 const props = defineProps<{
   separation: number;
   iterations: number;
+  slmWidth: number;
+  slmHeight: number;
+  fftWidth: number;
+  fftHeight: number;
   phaseMode: string;
   badge: string;
   running: boolean;
@@ -17,6 +23,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   "update:separation": [value: number];
   "update:iterations": [value: number];
+  "update:slmWidth": [value: number];
+  "update:slmHeight": [value: number];
   "update:phaseMode": [value: string];
   compile: [];
   step: [];
@@ -30,6 +38,17 @@ function numberFromEvent(event: Event): number {
 
 function stringFromEvent(event: Event): string {
   return (event.target as HTMLSelectElement).value;
+}
+
+function dimensionFromEvent(event: Event, fallback: number): number {
+  const input = event.target as HTMLInputElement;
+  if (!Number.isFinite(input.valueAsNumber)) {
+    input.value = String(fallback);
+    return fallback;
+  }
+  const value = Math.max(MIN_SLM_DIMENSION, Math.min(MAX_SLM_DIMENSION, Math.round(input.valueAsNumber)));
+  input.value = String(value);
+  return value;
 }
 </script>
 
@@ -71,6 +90,40 @@ function stringFromEvent(event: Event): string {
         :disabled="running"
         @input="emit('update:iterations', numberFromEvent($event))"
       >
+    </div>
+    <div class="resolution-block">
+      <div class="control-label">
+        <span>SLM RESOLUTION</span>
+        <output>{{ slmWidth }} &times; {{ slmHeight }} px</output>
+      </div>
+      <div class="resolution-fields">
+        <label>WIDTH / PX
+          <input
+            type="number"
+            :min="MIN_SLM_DIMENSION"
+            :max="MAX_SLM_DIMENSION"
+            step="1"
+            inputmode="numeric"
+            :value="slmWidth"
+            :disabled="running"
+            @change="emit('update:slmWidth', dimensionFromEvent($event, slmWidth))"
+          >
+        </label>
+        <span aria-hidden="true">&times;</span>
+        <label>HEIGHT / PX
+          <input
+            type="number"
+            :min="MIN_SLM_DIMENSION"
+            :max="MAX_SLM_DIMENSION"
+            step="1"
+            inputmode="numeric"
+            :value="slmHeight"
+            :disabled="running"
+            @change="emit('update:slmHeight', dimensionFromEvent($event, slmHeight))"
+          >
+        </label>
+      </div>
+      <p class="resolution-note">FFT COMPUTE GRID {{ fftWidth }} &times; {{ fftHeight }} / POWER-OF-TWO PADDED</p>
     </div>
     <div class="select-row">
       <label>ASSIGNMENT
