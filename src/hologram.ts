@@ -2,10 +2,9 @@ import { SlmError } from "./errors.js";
 import {
   createComplexField,
   fft2d,
-  sampleComplex,
-  scatterComplexAdjoint,
   type ComplexField,
 } from "./fft.js";
+import { mapPhysicalPointToDftFrequency, periodicFftDistance } from "./coordinates.js";
 import type {
   CalibrationPackage,
   FrameMetrics,
@@ -17,6 +16,7 @@ import type {
   TrapState,
 } from "./types.js";
 import { angularDistance, clamp, crc32, TAU, wrapPhase } from "./util.js";
+import { wasmNudftSampleTargets, wasmNudftSynthesizePhase } from "./wasm-core.js";
 
 // A coherent sum below this fraction has no numerically meaningful phase.
 // Both CPU and GPU use the same seeded fallback so float precision cannot send
@@ -34,7 +34,7 @@ interface SolverState {
 }
 
 export class SequentialWgsSolver {
-  readonly backendId = "wasm-fft-phase-locked-wgs";
+  readonly backendId = "wasm-exact-nudft-phase-locked-wgs";
   readonly width: number;
   readonly height: number;
   private readonly calibration: CalibrationPackage;
@@ -80,16 +80,9 @@ export class SequentialWgsSolver {
       throw new SlmError("NUMERIC_ERROR", "Trap frame contains a non-finite value", { stage: "SOLVING_SLM_FRAMES" });
     }
     const started = this.config.measureSolveTime ? nowMs() : 0;
-    const pixels = this.width * this.height;
     const mappedTargets = frame.traps.map((trap) => this.mapCoordinate(trap));
-    for (const target of mappedTargets) {
-      if (!Number.isFinite(target.x) || !Number.isFinite(target.y) || target.x < -0.5 || target.x > this.width - 0.5 || target.y < -0.5 || target.y > this.height - 0.5) {
-        throw new SlmError("OUT_OF_BOUNDS", "A calibrated trap coordinate lies outside the FFT grid", {
-          stage: "SOLVING_SLM_FRAMES",
-          details: { target, width: this.width, height: this.height },
-        });
-      }
-    }
+    const targetX = Float64Array.from(mappedTargets, (target) => target.x);
+    const targetY = Float64Array.from(mappedTargets, (target) => target.y);
     const previous = this.accepted;
     const targetPhases = new Map<number, number>();
     const weights = new Map<number, number>();
@@ -102,7 +95,9 @@ export class SequentialWgsSolver {
       );
       weights.set(trap.trapId, previous?.weights.get(trap.trapId) ?? 1);
     }
-    let phase = previous ? new Float64Array(previous.phase) : this.initializeSuperposition(frame);
+    let phase = previous
+      ? new Float64Array(previous.phase)
+      : this.initializeSuperposition(frame, targetX, targetY);
     const iterations = Math.min(
       Math.max(1, iterationBudget ?? (previous ? this.config.subsequentFrameIterations : this.config.firstFrameIterations)),
       this.config.maxIterations,
@@ -114,8 +109,8 @@ export class SequentialWgsSolver {
     let performedIterations = 0;
     for (let iteration = 0; iteration < iterations; iteration += 1) {
       performedIterations += 1;
-      const forward = this.forwardField(phase);
-      measured = mappedTargets.map((target) => sampleComplex(forward, target.x, target.y, true));
+      const spatial = this.spatialField(phase);
+      measured = this.measureTargets(spatial, targetX, targetY);
       amplitudes = measured.map((value) => Math.hypot(value.real, value.imag));
       const desired = frame.traps.map((trap) => Math.sqrt(Math.max(0, trap.intensity)));
       let numerator = 0;
@@ -133,37 +128,33 @@ export class SequentialWgsSolver {
         weights.set(trap.trapId, clamp(oldWeight * ratio ** this.config.gamma, this.config.minWeight, this.config.maxWeight));
       }
       normalizeWeights(weights);
-      const constrained = this.config.backgroundPolicy === "PRESERVE"
-        ? cloneField(forward)
-        : createComplexField(this.width, this.height);
-      // Replace the target support rather than adding a second field on top of
-      // the measured value. This is the Fourier-plane amplitude constraint.
-      for (const target of mappedTargets) clearComplexSupport(constrained, target.x, target.y);
+      const synthesizedAmplitudes = new Float64Array(frame.traps.length);
+      const synthesizedPhases = new Float64Array(frame.traps.length);
       for (let index = 0; index < frame.traps.length; index += 1) {
         const trap = frame.traps[index]!;
-        const target = mappedTargets[index]!;
         const targetPhase = chooseTargetPhase(this.config.targetPhaseMode, targetPhases.get(trap.trapId) ?? trap.targetPhaseRad, measured[index]!);
-        const targetAmplitude = (weights.get(trap.trapId) ?? 1) * desired[index]!;
-        scatterComplexAdjoint(constrained, target.x, target.y, targetAmplitude * Math.cos(targetPhase), targetAmplitude * Math.sin(targetPhase), true);
+        synthesizedAmplitudes[index] = (weights.get(trap.trapId) ?? 1) * desired[index]!;
+        synthesizedPhases[index] = targetPhase;
       }
-      fft2d(constrained, true);
-      for (let index = 0; index < phase.length; index += 1) {
-        const magnitude = Math.hypot(constrained.real[index]!, constrained.imag[index]!);
-        if (magnitude > this.config.epsilon) phase[index] = Math.atan2(constrained.imag[index]!, constrained.real[index]!);
-      }
+      wasmNudftSynthesizePhase(
+        targetX,
+        targetY,
+        synthesizedAmplitudes,
+        synthesizedPhases,
+        this.width,
+        this.height,
+        phase,
+        this.config.epsilon,
+        this.config.deterministicSeed,
+        false,
+      );
       maxRelativeError = maximumRelativeAmplitudeError(amplitudes, desired, scale, this.config.epsilon);
       const phaseError = maximumTargetPhaseError(frame.traps, measured, targetPhases, this.config.targetPhaseMode);
       converged = maxRelativeError <= this.config.convergenceTolerance && phaseError <= phaseConvergenceTolerance(this.config);
       if (converged) break;
     }
 
-    const displayPhase = this.composeDisplayPhase(phase);
-    const codes = this.quantize(displayPhase);
-    const optimizedForward = this.forwardField(phase);
-    const optimizedMeasured = frame.traps.map((trap) => {
-      const mapped = this.mapCoordinate(trap);
-      return sampleComplex(optimizedForward, mapped.x, mapped.y, true);
-    });
+    const optimizedMeasured = this.measureTargets(this.spatialField(phase), targetX, targetY);
     const optimizedAmplitudes = optimizedMeasured.map((value) => Math.hypot(value.real, value.imag));
     const optimizedDesired = frame.traps.map((trap) => Math.sqrt(Math.max(0, trap.intensity)));
     maxRelativeError = maximumRelativeAmplitudeError(
@@ -174,11 +165,10 @@ export class SequentialWgsSolver {
     );
     converged = maxRelativeError <= this.config.convergenceTolerance &&
       maximumTargetPhaseError(frame.traps, optimizedMeasured, targetPhases, this.config.targetPhaseMode) <= phaseConvergenceTolerance(this.config);
-    const finalForward = this.forwardField(this.decodeCodes(codes, displayPhase));
-    const finalMeasured = frame.traps.map((trap) => {
-      const mapped = this.mapCoordinate(trap);
-      return sampleComplex(finalForward, mapped.x, mapped.y, true);
-    });
+    const displayPhase = this.composeDisplayPhase(phase);
+    const codes = this.quantize(displayPhase);
+    const finalSpatial = this.spatialField(this.decodeCodes(codes, displayPhase));
+    const finalMeasured = this.measureTargets(finalSpatial, targetX, targetY);
     const finalAmplitudes = finalMeasured.map((value) => Math.hypot(value.real, value.imag));
     const measuredPhases = new Map<number, number>();
     const measuredIntensities = new Map<number, number>();
@@ -191,6 +181,8 @@ export class SequentialWgsSolver {
     maxRelativeError = maximumRelativeAmplitudeError(finalAmplitudes, finalDesired, finalScale, this.config.epsilon);
     converged = maxRelativeError <= this.config.convergenceTolerance &&
       maximumTargetPhaseError(frame.traps, finalMeasured, targetPhases, this.config.targetPhaseMode) <= phaseConvergenceTolerance(this.config);
+    const finalForward = cloneField(finalSpatial);
+    fft2d(finalForward, false);
     const metrics = this.evaluateMetrics(
       frame,
       finalForward,
@@ -243,40 +235,36 @@ export class SequentialWgsSolver {
     return this.accepted?.frameIndex;
   }
 
-  private initializeSuperposition(frame: TrapFrame): Float64Array {
+  private initializeSuperposition(
+    frame: TrapFrame,
+    targetX: Float64Array,
+    targetY: Float64Array,
+  ): Float64Array {
     const phase = new Float64Array(this.width * this.height);
     if (frame.traps.length === 0) return phase;
-    const targets = frame.traps.map((trap) => ({
-      mapped: this.mapCoordinate(trap),
-      amplitude: Math.sqrt(Math.max(0, trap.intensity)),
-      phase: trap.targetPhaseRad,
-    }));
-    const coherentAmplitude = targets.reduce((sum, target) => sum + target.amplitude, 0);
+    const amplitudes = Float64Array.from(frame.traps, (trap) => Math.sqrt(Math.max(0, trap.intensity)));
+    const phases = Float64Array.from(frame.traps, (trap) => trap.targetPhaseRad);
+    const coherentAmplitude = amplitudes.reduce((sum, amplitude) => sum + amplitude, 0);
     const cancellationThreshold = Math.max(
       this.config.epsilon,
       coherentAmplitude * WGS_INITIALIZATION_CANCELLATION_RATIO,
     );
-    for (let y = 0; y < this.height; y += 1) {
-      for (let x = 0; x < this.width; x += 1) {
-        let real = 0;
-        let imag = 0;
-        for (const target of targets) {
-          const cycles = wrappedDftCycles(target.mapped.x, x, this.width)
-            + wrappedDftCycles(target.mapped.y, y, this.height);
-          const angle = wrapPhase(TAU * cycles + target.phase);
-          real += target.amplitude * Math.cos(angle);
-          imag += target.amplitude * Math.sin(angle);
-        }
-        const index = y * this.width + x;
-        phase[index] = Math.hypot(real, imag) <= cancellationThreshold
-          ? deterministicInitializationPhase(index, this.config.deterministicSeed)
-          : Math.atan2(imag, real);
-      }
-    }
+    wasmNudftSynthesizePhase(
+      targetX,
+      targetY,
+      amplitudes,
+      phases,
+      this.width,
+      this.height,
+      phase,
+      cancellationThreshold,
+      this.config.deterministicSeed,
+      true,
+    );
     return phase;
   }
 
-  private forwardField(phase: Float64Array): ComplexField {
+  private spatialField(phase: Float64Array): ComplexField {
     const field = createComplexField(this.width, this.height);
     const activePixels = this.calibration.manifest.activeWidth * this.calibration.manifest.activeHeight;
     for (let index = 0; index < phase.length; index += 1) {
@@ -287,8 +275,19 @@ export class SequentialWgsSolver {
       field.real[index] = amplitude * Math.cos(phase[index]!);
       field.imag[index] = amplitude * Math.sin(phase[index]!);
     }
-    fft2d(field, false);
     return field;
+  }
+
+  private measureTargets(
+    field: ComplexField,
+    targetX: Float64Array,
+    targetY: Float64Array,
+  ): { real: number; imag: number }[] {
+    const measured = wasmNudftSampleTargets(field.real, field.imag, this.width, this.height, targetX, targetY);
+    return Array.from({ length: targetX.length }, (_, index) => ({
+      real: measured.real[index]!,
+      imag: measured.imag[index]!,
+    }));
   }
 
   private calibrationValueAt(
@@ -344,28 +343,7 @@ export class SequentialWgsSolver {
   }
 
   private mapCoordinate(trap: TrapState): { x: number; y: number } {
-    const transform = this.calibration.coordinateTransform;
-    if (transform?.physicalToFft) {
-      const mapped = transform.physicalToFft({ xUm: trap.xUm, yUm: trap.yUm });
-      return "x" in mapped ? mapped : { x: mapped.xUm, y: mapped.yUm };
-    }
-    if (transform && [transform.a, transform.b, transform.c, transform.d].every((value) => value !== undefined)) {
-      return {
-        x: transform.a! * trap.xUm + transform.b! * trap.yUm + (transform.offsetX ?? 0),
-        y: transform.c! * trap.xUm + transform.d! * trap.yUm + (transform.offsetY ?? 0),
-      };
-    }
-    const originX = transform?.originXUm ?? this.width / 2;
-    const originY = transform?.originYUm ?? this.height / 2;
-    const scaleX = transform?.scaleX ?? 1;
-    const scaleY = transform?.scaleY ?? 1;
-    const rotation = transform?.rotationRad ?? 0;
-    const x = trap.xUm * scaleX;
-    const y = trap.yUm * scaleY;
-    return {
-      x: originX + Math.cos(rotation) * x - Math.sin(rotation) * y,
-      y: originY - Math.sin(rotation) * x - Math.cos(rotation) * y,
-    };
+    return mapPhysicalPointToDftFrequency(trap, this.calibration, this.width, this.height);
   }
 
   private composeDisplayPhase(phase: Float64Array): Float64Array {
@@ -562,20 +540,6 @@ function calibrationValue(value: ArrayLike<number> | number | undefined, index: 
   return value[index] ?? fallback;
 }
 
-function clearComplexSupport(field: ComplexField, x: number, y: number): void {
-  const x0 = Math.floor(x);
-  const y0 = Math.floor(y);
-  for (const ix of [x0, x0 + 1]) {
-    for (const iy of [y0, y0 + 1]) {
-      const clampedX = Math.max(0, Math.min(field.width - 1, ix));
-      const clampedY = Math.max(0, Math.min(field.height - 1, iy));
-      const index = clampedY * field.width + clampedX;
-      field.real[index] = 0;
-      field.imag[index] = 0;
-    }
-  }
-}
-
 function inverseLut(phase: number, calibration: CalibrationPackage, maxCode: number): number {
   if (calibration.inversePhaseLut && calibration.inversePhaseLut.length > 1) {
     const position = ((phase + Math.PI) / TAU) * (calibration.inversePhaseLut.length - 1);
@@ -614,7 +578,10 @@ function maximumGhostIntensity(field: ComplexField, targets: { x: number; y: num
   let maximum = 0;
   for (let y = 0; y < field.height; y += 1) {
     for (let x = 0; x < field.width; x += 1) {
-      if (targets.some((target) => Math.hypot(target.x - x, target.y - y) <= 1.5)) continue;
+      if (targets.some((target) => Math.hypot(
+        periodicFftDistance(target.x, x, field.width),
+        periodicFftDistance(target.y, y, field.height),
+      ) <= 1.5)) continue;
       const index = y * field.width + x;
       maximum = Math.max(maximum, field.real[index]! ** 2 + field.imag[index]! ** 2);
     }
@@ -663,21 +630,6 @@ function meanOf(values: number[]): number {
 
 function standardDeviation(values: number[], mean: number): number {
   return values.length === 0 ? 0 : Math.sqrt(values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length);
-}
-
-function wrappedDftCycles(position: number, coordinate: number, extent: number): number {
-  const integral = Math.floor(position);
-  const modular = ((integral * coordinate) % extent + extent) % extent;
-  const fractional = position - integral;
-  return (modular + fractional * coordinate) / extent;
-}
-
-function deterministicInitializationPhase(index: number, seed: number): number {
-  let value = (((index >>> 0) ^ (seed >>> 0)) + 1) >>> 0;
-  value = Math.imul(value ^ (value >>> 16), 0x7feb352d) >>> 0;
-  value = Math.imul(value ^ (value >>> 15), 0x846ca68b) >>> 0;
-  value = (value ^ (value >>> 16)) >>> 0;
-  return (value >>> 8) / 0x1000000 * TAU - Math.PI;
 }
 
 function nowMs(): number {

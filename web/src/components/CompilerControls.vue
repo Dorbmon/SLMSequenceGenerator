@@ -15,6 +15,9 @@ const props = defineProps<{
   slmHeight: number;
   fftWidth: number;
   fftHeight: number;
+  wavelengthNm: number;
+  focalLengthMm: number;
+  pixelPitchUm: number;
   phaseMode: string;
   computeBackend: ComputeBackend;
   webgpuAvailable: boolean;
@@ -33,6 +36,9 @@ const emit = defineEmits<{
   "update:iterations": [value: number];
   "update:slmWidth": [value: number];
   "update:slmHeight": [value: number];
+  "update:wavelengthNm": [value: number];
+  "update:focalLengthMm": [value: number];
+  "update:pixelPitchUm": [value: number];
   "update:phaseMode": [value: string];
   "update:computeBackend": [value: ComputeBackend];
   compile: [];
@@ -62,6 +68,16 @@ function dimensionFromEvent(event: Event, fallback: number): number {
   }
   const value = Math.max(MIN_SLM_DIMENSION, Math.min(MAX_SLM_DIMENSION, Math.round(input.valueAsNumber)));
   input.value = String(value);
+  return value;
+}
+
+function positiveFromEvent(event: Event, fallback: number): number {
+  const input = event.target as HTMLInputElement;
+  const value = input.valueAsNumber;
+  if (!Number.isFinite(value) || value <= 0) {
+    input.value = String(fallback);
+    return fallback;
+  }
   return value;
 }
 </script>
@@ -139,6 +155,21 @@ function dimensionFromEvent(event: Event, fallback: number): number {
       </div>
       <p class="resolution-note">FFT COMPUTE GRID {{ fftWidth }} &times; {{ fftHeight }} / POWER-OF-TWO PADDED</p>
     </div>
+    <div class="optical-calibration-block">
+      <div class="control-label"><span>OPTICAL CALIBRATION</span><output>NO AUTO-FIT</output></div>
+      <div class="optical-calibration-fields">
+        <label>WAVELENGTH / NM
+          <input type="number" min="0.001" step="any" :value="wavelengthNm" :disabled="running" @change="emit('update:wavelengthNm', positiveFromEvent($event, wavelengthNm))">
+        </label>
+        <label>FOCAL LENGTH / MM
+          <input type="number" min="0.001" step="any" :value="focalLengthMm" :disabled="running" @change="emit('update:focalLengthMm', positiveFromEvent($event, focalLengthMm))">
+        </label>
+        <label>PIXEL PITCH / UM
+          <input type="number" min="0.001" step="any" :value="pixelPitchUm" :disabled="running" @change="emit('update:pixelPitchUm', positiveFromEvent($event, pixelPitchUm))">
+        </label>
+      </div>
+      <p class="resolution-note">FRAUNHOFER COORDINATE MAP / EXACT TRAP-DOMAIN NUDFT</p>
+    </div>
     <div class="select-row">
       <label>ASSIGNMENT
         <select :disabled="running">
@@ -154,8 +185,8 @@ function dimensionFromEvent(event: Event, fallback: number): number {
       </label>
       <label class="backend-choice">COMPUTE BACKEND
         <select :value="computeBackend" :disabled="running" @change="emit('update:computeBackend', backendFromEvent($event))">
-          <option value="wasm">WebAssembly / CPU FFT</option>
-          <option value="webgpu" :disabled="!webgpuAvailable">WebGPU / GPU-resident WGS</option>
+          <option value="wasm">WebAssembly / exact NUDFT</option>
+          <option value="webgpu" :disabled="!webgpuAvailable">WebGPU / GPU-resident exact NUDFT</option>
         </select>
         <small :class="{ 'is-available': webgpuAvailable }">{{ webgpuStatus }}</small>
       </label>

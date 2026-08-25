@@ -11,6 +11,7 @@ import type {
   TrapFrame,
 } from "../../../src/types.js";
 import type { OpticalTweezerInput } from "../lib/tweezers.js";
+import type { OpticalCalibrationInput } from "../lib/optical-calibration.js";
 
 export type ComputeBackend = "wasm" | "webgpu";
 
@@ -25,6 +26,7 @@ export interface SequenceWorkerInput {
   fftHeight: number;
   targetPhaseMode: "PHASE_LOCKED_WGS" | "SOFT_PHASE_LOCKED_WGS";
   backend: ComputeBackend;
+  opticalCalibration: OpticalCalibrationInput;
 }
 
 export interface TweezerFrameWorkerInput {
@@ -35,6 +37,7 @@ export interface TweezerFrameWorkerInput {
   fftHeight: number;
   iterations: number;
   backend: ComputeBackend;
+  opticalCalibration: OpticalCalibrationInput;
 }
 
 export type CompilerWorkerRequest =

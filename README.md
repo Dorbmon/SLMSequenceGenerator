@@ -1,8 +1,9 @@
 # SLM Sequence Compiler
 
 This repository contains the TypeScript orchestration layer and a dependency-free
-Rust/WebAssembly numerical core for the pipeline in `design.md`. Assignment and
-one- and two-dimensional FFTs execute over packed arrays in Wasm linear memory;
+Rust/WebAssembly numerical core for the pipeline in `design.md`. Assignment,
+one- and two-dimensional FFTs, exact arbitrary-frequency trap sampling, and its
+adjoint trap synthesis execute over packed arrays in Wasm linear memory;
 validation, planning orchestration, storage, and the public API remain in
 TypeScript.
 
@@ -65,21 +66,32 @@ normalized intensity field can also be exported as a display BMP or Float32
 raw array. Forward propagation supports both Wasm and a GPU-resident WebGPU
 path.
 
+Focal-plane coordinates are not auto-fitted. Both workspaces expose the laser
+wavelength, Fourier-lens focal length, and SLM pixel pitch and use the physical
+Fraunhofer relation `u = x N p / (lambda f)` (with the image-row sign applied to
+`y`). The displayed field of view is the corresponding Nyquist interval. The
+single-frame workspace can also load a monotonic measured display-code-to-phase
+LUT from JSON, CSV, or plain text; without one, the UI explicitly identifies
+the phase response as an ideal linear 2π simulation.
+
 Browser calculations run in a dedicated Web Worker. The interface, progress
 animations, navigation, and elapsed-time display remain responsive while Wasm
 is solving, and either sequence compilation or single-frame generation can be
 cancelled immediately.
 
-Both workspaces expose a compute-backend selector. The compatibility path uses
-the Rust/WebAssembly FFT core. On supported browsers, the WebGPU path keeps the
-phase field, radix-2 FFT intermediates, WGS weights, phase constraints,
-quantization, and accepted sequential state in GPU buffers across iterations;
-only the final cropped frame and compact metrics are read back. WebGPU support
-is checked inside the same dedicated worker that performs the computation.
-Wasm and WebGPU use the same range-reduced, seeded initialization when target
-phasors destructively cancel, preventing precision-dependent solver branches.
-Frames that exhaust their WGS budget remain exportable but are shown as a
-non-convergence warning instead of a verified acceptance.
+Both workspaces expose a compute-backend selector. Wasm and WebGPU use the same
+trap-domain WGS model: every iteration evaluates the unnormalised discrete
+Fourier sum exactly at each requested, potentially fractional trap coordinate,
+updates the trap weights, and synthesizes the SLM phase with the exact adjoint
+sum. No bilinear FFT-bin sampling or scattering is used. The WebGPU path keeps
+that entire iterative process, quantization, and accepted sequential state in
+GPU buffers. A full radix-2 FFT is run only after quantization for full-plane
+power and ghost diagnostics, followed by one cropped-frame/metrics readback.
+WebGPU support is checked inside the same dedicated worker that performs the
+computation. Both backends use the same range-reduced, seeded initialization
+when target phasors destructively cancel. Frames that exhaust their WGS budget
+remain exportable but are shown as a non-convergence warning instead of a
+verified acceptance.
 
 SLM output defaults to 1272×1024 pixels. Width and height can be changed from
 the compiler controls before a run; exported frame dimensions follow those
@@ -91,6 +103,12 @@ with `npm run dev`, create the production site in `web-dist/` with
 `npm run build:web`, or inspect that production build with `npm run preview`.
 Cloudflare Workers static-assets deployment uses the same `web-dist/` output via
 `npm run deploy`.
+
+The regression suite includes an artifact-boundary oracle: it solves an
+off-grid trap, exports and decodes the indexed grayscale BMP, then independently
+evaluates that decoded phase frame with a direct complex Fourier sum. This
+guards against a backend appearing converged under its own sampling
+approximation while emitting an optically different frame.
 
 Measured runs must provide a calibration package with a phase-response or
 inverse phase LUT. Set `simulationMode: true` only for the synthetic identity

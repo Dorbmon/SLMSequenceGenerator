@@ -109,6 +109,12 @@ export interface CoordinateTransform {
   b?: number;
   c?: number;
   d?: number;
+  /**
+   * SIGNED_FREQUENCY interprets transformed values as signed DFT-bin offsets
+   * in the Nyquist interval and wraps them to raw FFT storage indices.
+   * RAW_INDEX preserves the legacy direct grid-index convention.
+   */
+  fftCoordinateSpace?: "RAW_INDEX" | "SIGNED_FREQUENCY";
 }
 
 export interface CalibrationManifest {
@@ -122,6 +128,7 @@ export interface CalibrationManifest {
   fftWidth?: number;
   fftHeight?: number;
   pixelPitchUm?: number;
+  focalLengthMm?: number;
   fieldOfViewUm?: { xMinUm: number; xMaxUm: number; yMinUm: number; yMaxUm: number };
   coordinateConvention?: string;
   phaseConvention?: "NEGATIVE_PI_TO_PI" | "ZERO_TO_TWO_PI";

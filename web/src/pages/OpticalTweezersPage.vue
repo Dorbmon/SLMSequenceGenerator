@@ -10,6 +10,16 @@ import SlmFramePreview from "../components/SlmFramePreview.vue";
 import TargetImageImporter from "../components/TargetImageImporter.vue";
 import { encodeGrayscaleBmp } from "../lib/bmp.js";
 import {
+  createOpticalCalibration,
+  DEFAULT_FOCAL_LENGTH_MM,
+  DEFAULT_PIXEL_PITCH_UM,
+  DEFAULT_WAVELENGTH_NM,
+  opticalFieldOfViewUm,
+  parsePhaseResponseLut,
+  validateOpticalCalibration,
+  type OpticalCalibrationInput,
+} from "../lib/optical-calibration.js";
+import {
   DEFAULT_SLM_HEIGHT,
   DEFAULT_SLM_WIDTH,
   MAX_SLM_DIMENSION,
@@ -48,6 +58,7 @@ const props = defineProps<{
 }>();
 
 const upload = ref<HTMLInputElement | null>(null);
+const calibrationUpload = ref<HTMLInputElement | null>(null);
 const targetImageImporter = ref<TargetImageImporterHandle | null>(null);
 const forwardSimulator = ref<ForwardSimulatorHandle | null>(null);
 const tweezers = ref<OpticalTweezerInput[]>(cloneOpticalTweezers(DEFAULT_OPTICAL_TWEEZERS));
@@ -57,6 +68,11 @@ const slmWidth = ref(DEFAULT_SLM_WIDTH);
 const slmHeight = ref(DEFAULT_SLM_HEIGHT);
 const iterations = ref(4);
 const computeBackend = ref<ComputeBackend>("wasm");
+const wavelengthNm = ref(DEFAULT_WAVELENGTH_NM);
+const focalLengthMm = ref(DEFAULT_FOCAL_LENGTH_MM);
+const pixelPitchUm = ref(DEFAULT_PIXEL_PITCH_UM);
+const phaseResponseLut = shallowRef<number[] | undefined>(undefined);
+const phaseResponseFilename = ref("");
 const running = ref(false);
 const outputState = ref<OutputState>("idle");
 const outputPixels = shallowRef<Uint8Array | Uint16Array | null>(null);
@@ -65,7 +81,7 @@ const elapsedMs = ref<number | null>(null);
 const errorMessage = ref("");
 const qualityWarning = ref("");
 const checksum = ref<number | null>(null);
-const resultBackendId = ref("wasm-fft-phase-locked-wgs");
+const resultBackendId = ref("wasm-exact-nudft-phase-locked-wgs");
 let suppressTableSync = false;
 let generation = 0;
 let frameWorker: Worker | null = null;
@@ -74,6 +90,19 @@ let calculationStarted = 0;
 
 const fftWidth = computed(() => fftDimensionFor(slmWidth.value));
 const fftHeight = computed(() => fftDimensionFor(slmHeight.value));
+const opticalCalibrationInput = computed<OpticalCalibrationInput>(() => ({
+  wavelengthNm: wavelengthNm.value,
+  focalLengthMm: focalLengthMm.value,
+  pixelPitchUm: pixelPitchUm.value,
+  ...(phaseResponseLut.value ? { phaseResponseLut: [...phaseResponseLut.value] } : {}),
+}));
+const fieldOfViewUm = computed(() => {
+  try {
+    return opticalFieldOfViewUm(opticalCalibrationInput.value);
+  } catch {
+    return null;
+  }
+});
 const phaseStatus = computed(() => {
   if (running.value) return computeBackend.value === "webgpu" ? "SOLVING / WEBGPU WGS" : "SOLVING / WASM WGS";
   if (outputState.value === "accepted") return "FRAME ACCEPTED";
@@ -223,13 +252,18 @@ function reset(): void {
   slmHeight.value = DEFAULT_SLM_HEIGHT;
   iterations.value = 4;
   computeBackend.value = "wasm";
+  wavelengthNm.value = DEFAULT_WAVELENGTH_NM;
+  focalLengthMm.value = DEFAULT_FOCAL_LENGTH_MM;
+  pixelPitchUm.value = DEFAULT_PIXEL_PITCH_UM;
+  phaseResponseLut.value = undefined;
+  phaseResponseFilename.value = "";
   running.value = false;
   outputState.value = "idle";
   outputPixels.value = null;
   metrics.value = null;
   elapsedMs.value = null;
   checksum.value = null;
-  resultBackendId.value = "wasm-fft-phase-locked-wgs";
+  resultBackendId.value = "wasm-exact-nudft-phase-locked-wgs";
   errorMessage.value = "";
   qualityWarning.value = "";
   nextTick(() => {
@@ -270,36 +304,59 @@ function updateComputeBackend(event: Event): void {
   invalidateOutput();
 }
 
-function calibrationFor(input: readonly OpticalTweezerInput[]): CalibrationPackage {
-  const maximumX = Math.max(1, ...input.map((tweezer) => Math.abs(tweezer.xUm)));
-  const maximumY = Math.max(1, ...input.map((tweezer) => Math.abs(tweezer.yUm)));
-  const uniformScale = Math.min(
-    fftWidth.value * 0.4 / maximumX,
-    fftHeight.value * 0.4 / maximumY,
-  );
-  return {
-    manifest: {
-      calibrationId: "browser-single-frame",
-      wavelengthNm: 1,
-      activeWidth: slmWidth.value,
-      activeHeight: slmHeight.value,
-      fftWidth: fftWidth.value,
-      fftHeight: fftHeight.value,
-      coordinateConvention: "+x right, +y up",
-    },
-    coordinateTransform: {
-      originXUm: fftWidth.value / 2,
-      originYUm: fftHeight.value / 2,
-      scaleX: uniformScale,
-      scaleY: uniformScale,
-    },
-  };
+function calibrationFor(): CalibrationPackage {
+  return createOpticalCalibration({
+    activeWidth: slmWidth.value,
+    activeHeight: slmHeight.value,
+    fftWidth: fftWidth.value,
+    fftHeight: fftHeight.value,
+  }, opticalCalibrationInput.value, "browser-single-frame-optical-calibration");
+}
+
+function updateOpticalCalibration(): void {
+  try {
+    validateOpticalCalibration(opticalCalibrationInput.value);
+    errorMessage.value = "";
+    invalidateOutput();
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : "Invalid optical calibration";
+    outputState.value = "rejected";
+  }
+}
+
+async function loadPhaseResponse(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  if (!file) return;
+  try {
+    phaseResponseLut.value = parsePhaseResponseLut(await file.text());
+    phaseResponseFilename.value = file.name;
+    invalidateOutput();
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : "Unable to load the measured phase-response LUT";
+    outputState.value = "rejected";
+  }
+}
+
+function clearPhaseResponse(): void {
+  phaseResponseLut.value = undefined;
+  phaseResponseFilename.value = "";
+  invalidateOutput();
 }
 
 function generateFrame(): void {
   if (running.value) return;
   const input = validatedTweezers();
   if (!input) return;
+  try {
+    validateOpticalCalibration(opticalCalibrationInput.value);
+    calibrationFor();
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : "Invalid optical calibration";
+    outputState.value = "rejected";
+    return;
+  }
   terminateFrameWorker();
   const jobId = ++generation;
   running.value = true;
@@ -354,6 +411,7 @@ function generateFrame(): void {
       fftHeight: fftHeight.value,
       iterations: iterations.value,
       backend: computeBackend.value,
+      opticalCalibration: opticalCalibrationInput.value,
     },
   };
   worker.postMessage(request);
@@ -442,7 +500,7 @@ function exportMetadata(): void {
   if (!outputPixels.value || !metrics.value) return;
   const input = validatedTweezers();
   if (!input) return;
-  const calibration = calibrationFor(input);
+  const calibration = calibrationFor();
   const payload = {
     formatVersion: "1.0",
     output: {
@@ -462,6 +520,7 @@ function exportMetadata(): void {
     calibration: {
       manifest: calibration.manifest,
       coordinateTransform: calibration.coordinateTransform,
+      phaseResponseLut: phaseResponseLut.value ?? "ideal linear 2π response",
     },
     tweezers: input,
     metrics: metrics.value,
@@ -534,7 +593,7 @@ defineExpose({ reset });
         </div>
         <div class="tweezer-editor-intro">
           <h2>Target field</h2>
-          <p>Coordinates are in micrometres and auto-fit to the simulated Fourier plane. Phase is the desired complex-field phase in radians; intensity is relative power.</p>
+          <p>Coordinates are physical focal-plane micrometres. Wavelength, Fourier-lens focal length, and SLM pixel pitch determine the exact NUDFT frequency; phase is the requested complex-field phase.</p>
         </div>
 
         <div class="tweezer-plane" aria-label="Optical tweezer coordinate and phase preview">
@@ -620,12 +679,38 @@ defineExpose({ reset });
                 </label>
               </div>
               <p class="resolution-note">FFT COMPUTE GRID {{ fftWidth }} &times; {{ fftHeight }} / POWER-OF-TWO PADDED</p>
-              <p class="tweezer-calibration-note">SIMULATION CALIBRATION / LINEAR 0–2π PHASE RESPONSE</p>
+            </div>
+            <div class="optical-calibration-block">
+              <div class="control-label"><span>OPTICAL CALIBRATION</span><output>FRAUNHOFER / NUDFT</output></div>
+              <div class="optical-calibration-fields">
+                <label>WAVELENGTH / NM
+                  <input v-model.number="wavelengthNm" type="number" min="0.001" step="any" :disabled="running" @change="updateOpticalCalibration">
+                </label>
+                <label>FOCAL LENGTH / MM
+                  <input v-model.number="focalLengthMm" type="number" min="0.001" step="any" :disabled="running" @change="updateOpticalCalibration">
+                </label>
+                <label>PIXEL PITCH / UM
+                  <input v-model.number="pixelPitchUm" type="number" min="0.001" step="any" :disabled="running" @change="updateOpticalCalibration">
+                </label>
+              </div>
+              <p class="tweezer-calibration-note">
+                FOCAL-PLANE FOV {{ fieldOfViewUm === null ? "INVALID" : `${fieldOfViewUm.toFixed(1)} × ${fieldOfViewUm.toFixed(1)} UM` }} / NO AUTO-FIT
+              </p>
+              <div class="phase-lut-actions">
+                <button type="button" :disabled="running" @click="calibrationUpload?.click()">
+                  {{ phaseResponseLut ? "Replace measured phase LUT" : "Upload measured phase LUT" }}
+                </button>
+                <button v-if="phaseResponseLut" type="button" :disabled="running" @click="clearPhaseResponse">Use ideal linear response</button>
+                <input ref="calibrationUpload" class="sr-only" type="file" accept="application/json,.json,.csv,.txt,text/plain,text/csv" @change="loadPhaseResponse">
+              </div>
+              <p class="resolution-note">
+                {{ phaseResponseLut ? `MEASURED RESPONSE / ${phaseResponseLut.length} SAMPLES / ${phaseResponseFilename}` : "IDEAL LINEAR 2π RESPONSE / UPLOAD MEASURED VALUES FOR HARDWARE" }}
+              </p>
             </div>
             <label class="tweezer-backend-choice">COMPUTE BACKEND
               <select :value="computeBackend" :disabled="running" @change="updateComputeBackend">
-                <option value="wasm">WebAssembly / CPU FFT</option>
-                <option value="webgpu" :disabled="!webgpuAvailable">WebGPU / GPU-resident WGS</option>
+                <option value="wasm">WebAssembly / exact NUDFT</option>
+                <option value="webgpu" :disabled="!webgpuAvailable">WebGPU / GPU-resident exact NUDFT</option>
               </select>
               <small :class="{ 'is-available': webgpuAvailable }">{{ webgpuStatus }}</small>
             </label>
@@ -636,7 +721,7 @@ defineExpose({ reset });
             <ComputationActivity
               v-if="running"
               label="SYNTHESIZING PHASE FIELD"
-              :detail="`${fftWidth} × ${fftHeight} FFT / DEDICATED WORKER`"
+              :detail="`${fftWidth} × ${fftHeight} EXACT TRAP NUDFT / DEDICATED WORKER`"
               :elapsed-ms="elapsedMs ?? 0"
               :progress="null"
             />

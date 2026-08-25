@@ -488,6 +488,7 @@ export function validateCalibrationManifest(calibration: CalibrationPackage): vo
   if (manifest.fftHeight !== undefined) positiveInteger(manifest.fftHeight, "calibration fftHeight");
   positive(manifest.wavelengthNm, "calibration wavelengthNm");
   if (manifest.pixelPitchUm !== undefined) positive(manifest.pixelPitchUm, "calibration pixelPitchUm");
+  if (manifest.focalLengthMm !== undefined) positive(manifest.focalLengthMm, "calibration focalLengthMm");
   if (manifest.fftWidth !== undefined && manifest.fftHeight === undefined ||
       manifest.fftHeight !== undefined && manifest.fftWidth === undefined) {
     throw new SlmError("CALIBRATION_MISMATCH", "Both FFT dimensions must be specified", { stage: "VALIDATING" });
@@ -557,6 +558,11 @@ function validateCalibration(
   if (transform) {
     for (const value of [transform.originXUm, transform.originYUm, transform.scaleX, transform.scaleY, transform.rotationRad, transform.offsetX, transform.offsetY, transform.a, transform.b, transform.c, transform.d]) {
       if (value !== undefined) assertFinite(value, "coordinate transform");
+    }
+    if (transform.fftCoordinateSpace !== undefined &&
+        transform.fftCoordinateSpace !== "RAW_INDEX" &&
+        transform.fftCoordinateSpace !== "SIGNED_FREQUENCY") {
+      throw new SlmError("CALIBRATION_MISMATCH", "Unknown FFT coordinate space", { stage: "VALIDATING" });
     }
   }
   if (calibration.phaseSigns) {

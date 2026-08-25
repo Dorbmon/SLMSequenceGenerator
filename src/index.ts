@@ -2,6 +2,7 @@ export * from "./types.js";
 export * from "./errors.js";
 export * from "./util.js";
 export * from "./geometry.js";
+export * from "./coordinates.js";
 export * from "./normalization.js";
 export * from "./assignment.js";
 export * from "./planning.js";
@@ -11,5 +12,10 @@ export * from "./hologram.js";
 export * from "./frame-store.js";
 export * from "./storage.js";
 export * from "./compiler.js";
-export { WASM_CORE_BUILD_ID, getWasmCoreInfo } from "./wasm-core.js";
+export {
+  WASM_CORE_BUILD_ID,
+  getWasmCoreInfo,
+  wasmNudftSampleTargets,
+  wasmNudftSynthesizePhase,
+} from "./wasm-core.js";
 export type { WasmCoreInfo } from "./wasm-core.js";

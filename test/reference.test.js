@@ -56,8 +56,8 @@ test("Hungarian solver returns a known optimum", () => {
 test("Wasm FFT round trips power-of-two, non-power-of-two, and 2-D fields", () => {
   const core = getWasmCoreInfo();
   assert.equal(core.backend, "webassembly");
-  assert.match(core.buildId, /^rust-wasm-core-abi1-[0-9a-f]{12}$/);
-  assert.equal(core.abiVersion, 1);
+  assert.match(core.buildId, /^rust-wasm-core-abi2-[0-9a-f]{12}$/);
+  assert.equal(core.abiVersion, 2);
   assert.ok(core.moduleBytes > 0);
   const real = new Float64Array([1, 2, 3, 4]);
   const imag = new Float64Array(4);

@@ -751,11 +751,26 @@ $$
 
 ### 13.2 Coordinate calibration
 
-The production solver MUST use a measured coordinate transform:
+The production solver MUST use either measured coordinate calibration or the
+calibrated Fraunhofer transform:
 
 $$
 C:(x_{\mu\mathrm{m}},y_{\mu\mathrm{m}})\rightarrow(u_{\mathrm{FFT}},v_{\mathrm{FFT}}).
 $$
+
+For wavelength $\lambda$, Fourier-lens focal length $f$, SLM pitches
+$p_x,p_y$, and computational extents $N_x,N_y$:
+
+$$
+u_{\mathrm{FFT}}=\frac{xN_xp_x}{\lambda f},\qquad
+v_{\mathrm{FFT}}=-\frac{yN_yp_y}{\lambda f}.
+$$
+
+The sign on $v$ converts the physical +y-up convention to row-major image
+coordinates. Signed frequencies MUST be retained until an actual FFT array is
+indexed; prematurely adding $N_y$ loses fractional precision on float32 GPU
+backends. The valid physical field is the Nyquist interval
+$|x|,|y|\leq\lambda f/(2p)$.
 
 The MVP MAY use an affine transform. Polynomial distortion correction or a measured lookup map MAY be added later.
 
@@ -764,9 +779,10 @@ The MVP MAY use an affine transform. Polynomial distortion correction or a measu
 - SLM arrays are stored row-major.
 - The active physical aperture MAY be embedded in a larger zero-padded FFT grid.
 - The active-aperture mask sets incident amplitude to zero outside physical pixels.
-- Integer FFT target coordinates are sufficient for the baseline.
 - Two-times oversampling SHOULD be supported.
-- Bilinear complex sampling and scattering MAY support sub-grid trap positions.
+- Arbitrary fractional trap coordinates MUST be evaluated with the exact
+  discrete Fourier sum. Bilinear FFT-bin sampling and adjoint scattering MUST
+  NOT be used as a physical target-field constraint.
 
 ### 13.4 First-frame initialization
 
@@ -817,13 +833,16 @@ For iteration $k$ of trap frame $f$:
    U^{(k)}=A_{\mathrm{in}}e^{i\phi^{(k)}}.
    $$
 
-2. Forward propagate:
+2. Evaluate the exact, unnormalised NUDFT at every target coordinate:
 
    $$
-   V^{(k)}=\mathrm{FFT2}(U^{(k)}).
+   v_j^{(k)}=
+   \sum_{m=0}^{N_y-1}\sum_{n=0}^{N_x-1}
+   U_{m,n}^{(k)}
+   \exp\left[-i2\pi\left(\frac{u_jn}{N_x}+\frac{v_jm}{N_y}\right)\right].
    $$
 
-3. Sample the complex field at every target trap:
+3. Measure every target amplitude:
 
    $$
    v_j=V^{(k)}(\mathbf{x}_j), \qquad a_j=|v_j|.
@@ -844,28 +863,31 @@ For iteration $k$ of trap frame $f$:
 
 6. Clip and normalize the weights to unit mean.
 
-7. Write the constrained target field:
+7. Select the constrained complex target phasors:
 
    $$
-   V_{\mathrm{constrained}}(\mathbf{x}_j)
+   q_j
    =w_jd_je^{i\theta_j}.
    $$
 
-8. Apply the configured background policy.
-
-9. Back propagate:
+8. Apply the exact adjoint trap sum at every SLM pixel:
 
    $$
-   B^{(k)}=\mathrm{IFFT2}(V_{\mathrm{constrained}}).
+   B_{m,n}^{(k)}=
+   \sum_j q_j
+   \exp\left[i2\pi\left(\frac{u_jn}{N_x}+\frac{v_jm}{N_y}\right)\right].
    $$
 
-10. Apply the phase-only constraint:
+9. Apply the phase-only constraint:
 
    $$
    \phi^{(k+1)}=\arg B^{(k)}.
    $$
 
-11. Evaluate convergence and numerical validity.
+10. Evaluate convergence and numerical validity with a fresh exact target
+    sum. After quantization, decode the actual output codes and evaluate the
+    exact target sum again. A full FFT MAY then be run once for full-plane
+    power and ghost diagnostics; it is not part of the sparse WGS iteration.
 
 ### 13.7 Target-phase modes
 
@@ -1011,7 +1033,7 @@ Cancellation is legal from every nonterminal state. After cancellation, the cont
 | Wasm assignment module | Cost matrix construction and Hungarian/Jonker-Volgenant assignment. |
 | Wasm path planner | Direct planner, reservation-table A*, conflict decomposition, and ECBS fallback. |
 | Wasm trajectory module | Minimum-jerk time parameterization and trap-frame sampling. |
-| Wasm hologram core | FFT propagation, WGS, phase continuity, calibration composition, and metrics. |
+| Wasm hologram core | Exact trap NUDFT/adjoint WGS, diagnostic FFT propagation, phase continuity, calibration composition, and metrics. |
 | Sequence orchestrator | Couples trap-frame generation to sequential hologram solving and adaptive refinement. |
 | Frame store | Persists large trap and SLM frame streams without retaining the entire sequence in Wasm memory. |
 | Native hardware adapter | Loads validated frame packets and presents them through a vendor SDK or monitor output. |
@@ -1451,6 +1473,9 @@ Every error MUST include:
 - constant field FFT;
 - forward/inverse round trip;
 - comparison to a trusted native or NumPy reference;
+- exact fractional-frequency NUDFT comparison to an independent direct sum;
+- exported indexed-BMP decode followed by an independent off-grid Fourier
+  field oracle;
 - uniform target array;
 - nonuniform requested intensities;
 - moving single trap;
@@ -1510,11 +1535,14 @@ MAPF has difficult worst cases. The tiered design controls practical cost by:
 
 ### 27.3 Hologram cost
 
-For $F$ trap frames, $K$ WGS iterations per frame, and $P=N_xN_y$ FFT cells, the dominant work is approximately:
+For $F$ trap frames, $K$ WGS iterations per frame, $P=N_xN_y$ SLM cells, and
+$T$ traps, exact sparse trap-domain WGS costs approximately:
 
 $$
-O(FKP\log P).
+O(FKPT).
 $$
+
+The optional final full-plane diagnostic FFT adds $O(FP\log P)$.
 
 Warm starting is therefore essential. The first frame can receive a larger iteration budget, while later frames SHOULD use fewer iterations unless a quality gate fails.
 
@@ -1809,9 +1837,7 @@ SolveSequentialSlmFrame(frame):
 
     for iteration in 0 .. iterationBudget(frame)-1:
         U = incidentAmplitude * exp(i * phi)
-        V = FFT2(U)
-
-        measured = sampleComplexTargets(V, targets)
+        measured = exactNudftTargets(U, targets)
         scale = fitGlobalAmplitudeScale(measured, frame.traps)
         weights = updateClipAndNormalizeWeights(
             weights,
@@ -1821,26 +1847,19 @@ SolveSequentialSlmFrame(frame):
             gamma,
             epsilon)
 
-        clear(Vconstrained)
-
         for each trap j:
             targetPhase = chooseTargetPhaseByMode(
                 trapId=j.id,
                 persistentPhase=targetPhases[j.id],
                 measuredPhase=arg(measured[j]))
 
-            targetAmplitude = weights[j] * sqrt(frame.traps[j].intensity)
-            scatterComplexTarget(
-                Vconstrained,
-                targets[j],
-                targetAmplitude,
-                targetPhase)
+            targetPhasor[j] = (
+                weights[j] * sqrt(frame.traps[j].intensity)
+                * exp(i * targetPhase))
 
-        applyBackgroundPolicy(Vconstrained, V)
-        B = IFFT2(Vconstrained)
-        phi = arg(B)
+        phi = arg(exactAdjointTrapSum(targetPhasor, targets))
 
-        iterationMetrics = evaluateWgsIteration(V, measured, weights)
+        iterationMetrics = evaluateWgsIteration(measured, weights)
 
         if invalid(iterationMetrics):
             return NUMERIC_ERROR
@@ -1855,8 +1874,13 @@ SolveSequentialSlmFrame(frame):
         + digitalLens)
 
     outputCodes = inversePhaseLut(displayPhase)
+    decodedOutput = phaseResponseLut(outputCodes)
+    finalTargets = exactNudftTargets(
+        incidentAmplitude * exp(i * decodedOutput),
+        targets)
     finalMetrics = evaluateFrameAndTransition(
         outputCodes,
+        finalTargets,
         frame,
         previousAcceptedState)
 

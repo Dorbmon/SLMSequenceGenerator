@@ -2,6 +2,7 @@ import {
   SlmError,
   angularDistance,
   clamp,
+  mapPhysicalPointToDftFrequency,
   type CalibrationPackage,
   type FrameMetrics,
   type HologramConfig,
@@ -13,7 +14,7 @@ import {
   wrapPhase,
 } from "../../../src/index.js";
 
-export const WEBGPU_WGS_BACKEND_ID = "webgpu-radix2-phase-locked-wgs";
+export const WEBGPU_WGS_BACKEND_ID = "webgpu-exact-nudft-phase-locked-wgs";
 
 export interface WebGpuCapability {
   available: boolean;
@@ -24,6 +25,7 @@ export interface WebGpuCapability {
 const TAU = Math.PI * 2;
 const WORKGROUP_SIZE = 256;
 const TARGET_WORKGROUP_SIZE = 64;
+const EXACT_TARGET_WORKGROUP_SIZE = 256;
 const TARGET_STRIDE = 32;
 const MAX_TARGETS = 4096;
 const INVERSE_LUT_SIZE = 4096;
@@ -34,9 +36,9 @@ type GeneralPipelineName =
   | "make_field"
   | "sample_targets"
   | "update_weights"
-  | "copy_background"
-  | "apply_constraints"
-  | "extract_phase"
+  | "synthesize_phase"
+  | "clear_support"
+  | "mark_support"
   | "quantize_codes"
   | "make_final_field"
   | "reduce_field"
@@ -88,9 +90,10 @@ export async function inspectWebGpu(): Promise<WebGpuCapability> {
 }
 
 /**
- * Radix-2 WGS implementation whose phase field, FFT intermediates, target
- * weights, quantized codes, and accepted sequential state stay in GPU buffers.
- * One compact readback is performed after the final quantized propagation.
+ * Exact trap-domain WGS implementation whose phase field, arbitrary-frequency
+ * Fourier samples, target weights, quantized codes, and accepted sequential
+ * state stay in GPU buffers. A radix-2 FFT is used only once, after the solve,
+ * for full-plane diagnostics. One compact final readback is performed.
  */
 export class WebGpuSequentialWgsSolver implements SequentialHologramBackend {
   readonly backendId = WEBGPU_WGS_BACKEND_ID;
@@ -111,7 +114,7 @@ export class WebGpuSequentialWgsSolver implements SequentialHologramBackend {
   private readonly bindGroups = new Map<GeneralPipelineName, GPUBindGroup>();
   private fftPipeline!: GPUComputePipeline;
   private bitReversePipeline!: GPUComputePipeline;
-  private fftBindGroups!: { field: GPUBindGroup; constrained: GPUBindGroup };
+  private fftBindGroup!: GPUBindGroup;
   private fftParameterBuffer!: GPUBuffer;
   private readonly fftParameterOffsets = new Map<string, number>();
   private acceptedTargetCount = 0;
@@ -156,7 +159,6 @@ export class WebGpuSequentialWgsSolver implements SequentialHologramBackend {
       acceptedPhase: device.createBuffer({ label: "WGS accepted phase", size: scalarBytes, usage: storage | copySource | copyDestination }),
       amplitude: device.createBuffer({ label: "WGS incident amplitude", size: scalarBytes, usage: storage | copyDestination }),
       field: device.createBuffer({ label: "WGS Fourier field", size: complexBytes, usage: storage }),
-      constrained: device.createBuffer({ label: "WGS constrained field", size: complexBytes, usage: storage }),
       correction: device.createBuffer({ label: "WGS phase correction", size: scalarBytes, usage: storage | copyDestination }),
       inverseLut: device.createBuffer({ label: "WGS inverse phase LUT", size: INVERSE_LUT_SIZE * 4, usage: storage | copyDestination }),
       decodeLut: device.createBuffer({ label: "WGS phase response LUT", size: (this.config.format === "UINT8" ? 256 : 65536) * 4, usage: storage | copyDestination }),
@@ -213,14 +215,6 @@ export class WebGpuSequentialWgsSolver implements SequentialHologramBackend {
       });
     }
     const mappedTargets = frame.traps.map((trap) => this.mapCoordinate(trap));
-    for (const target of mappedTargets) {
-      if (!Number.isFinite(target.x) || !Number.isFinite(target.y) || target.x < -0.5 || target.x > this.width - 0.5 || target.y < -0.5 || target.y > this.height - 0.5) {
-        throw new SlmError("OUT_OF_BOUNDS", "A calibrated trap coordinate lies outside the FFT grid", {
-          stage: "SOLVING_SLM_FRAMES",
-          details: { target, width: this.width, height: this.height },
-        });
-      }
-    }
 
     const started = nowMs();
     const targetCount = frame.traps.length;
@@ -237,18 +231,16 @@ export class WebGpuSequentialWgsSolver implements SequentialHologramBackend {
     this.dispatch(encoder, "initialize_phase", this.pixelCount);
     for (let iteration = 0; iteration < iterations; iteration += 1) {
       this.dispatch(encoder, "make_field", this.pixelCount);
-      this.encodeFft(encoder, this.fftBindGroups.field, false);
-      this.dispatch(encoder, "sample_targets", targetCount, TARGET_WORKGROUP_SIZE);
+      this.dispatch(encoder, "sample_targets", targetCount * EXACT_TARGET_WORKGROUP_SIZE, EXACT_TARGET_WORKGROUP_SIZE);
       this.dispatch(encoder, "update_weights", 1, 1);
-      this.dispatch(encoder, "copy_background", this.pixelCount);
-      this.dispatch(encoder, "apply_constraints", 1, 1);
-      this.encodeFft(encoder, this.fftBindGroups.constrained, true);
-      this.dispatch(encoder, "extract_phase", this.pixelCount);
+      this.dispatch(encoder, "synthesize_phase", this.pixelCount);
     }
     this.dispatch(encoder, "quantize_codes", this.pixelCount);
     this.dispatch(encoder, "make_final_field", this.pixelCount);
-    this.encodeFft(encoder, this.fftBindGroups.field, false);
-    this.dispatch(encoder, "sample_targets", targetCount, TARGET_WORKGROUP_SIZE);
+    this.dispatch(encoder, "sample_targets", targetCount * EXACT_TARGET_WORKGROUP_SIZE, EXACT_TARGET_WORKGROUP_SIZE);
+    this.dispatch(encoder, "clear_support", this.pixelCount);
+    this.dispatch(encoder, "mark_support", 1, 1);
+    this.encodeFft(encoder, this.fftBindGroup, false);
     this.dispatch(encoder, "reduce_field", this.pixelCount);
     this.dispatch(encoder, "finish_reduction", 1, 1);
     const packedWords = this.packedByteLength / 4;
@@ -353,9 +345,9 @@ export class WebGpuSequentialWgsSolver implements SequentialHologramBackend {
       "make_field",
       "sample_targets",
       "update_weights",
-      "copy_background",
-      "apply_constraints",
-      "extract_phase",
+      "synthesize_phase",
+      "clear_support",
+      "mark_support",
       "quantize_codes",
       "make_final_field",
       "reduce_field",
@@ -375,9 +367,9 @@ export class WebGpuSequentialWgsSolver implements SequentialHologramBackend {
       make_field: [0, 5, 7, 8],
       sample_targets: [0, 1, 2, 8],
       update_weights: [0, 1, 2],
-      copy_background: [0, 8, 9, 18],
-      apply_constraints: [0, 1, 2, 9, 18],
-      extract_phase: [0, 5, 9],
+      synthesize_phase: [0, 1, 2, 5],
+      clear_support: [0, 18],
+      mark_support: [0, 1, 18],
       quantize_codes: [0, 5, 10, 11, 13],
       make_final_field: [0, 7, 8, 12, 13],
       reduce_field: [0, 8, 13, 14, 15, 18],
@@ -394,7 +386,6 @@ export class WebGpuSequentialWgsSolver implements SequentialHologramBackend {
       6: this.buffers.acceptedPhase!,
       7: this.buffers.amplitude!,
       8: this.buffers.field!,
-      9: this.buffers.constrained!,
       10: this.buffers.correction!,
       11: this.buffers.inverseLut!,
       12: this.buffers.decodeLut!,
@@ -471,10 +462,7 @@ export class WebGpuSequentialWgsSolver implements SequentialHologramBackend {
         { binding: 1, resource: { buffer: this.fftParameterBuffer, size: 32 } },
       ],
     });
-    this.fftBindGroups = {
-      field: group(this.buffers.field!, "FFT field bindings"),
-      constrained: group(this.buffers.constrained!, "FFT constrained bindings"),
-    };
+    this.fftBindGroup = group(this.buffers.field!, "FFT field bindings");
   }
 
   private dispatch(
@@ -552,28 +540,7 @@ export class WebGpuSequentialWgsSolver implements SequentialHologramBackend {
   }
 
   private mapCoordinate(trap: TrapState): { x: number; y: number } {
-    const transform = this.calibration.coordinateTransform;
-    if (transform?.physicalToFft) {
-      const mapped = transform.physicalToFft({ xUm: trap.xUm, yUm: trap.yUm });
-      return "x" in mapped ? mapped : { x: mapped.xUm, y: mapped.yUm };
-    }
-    if (transform && [transform.a, transform.b, transform.c, transform.d].every((value) => value !== undefined)) {
-      return {
-        x: transform.a! * trap.xUm + transform.b! * trap.yUm + (transform.offsetX ?? 0),
-        y: transform.c! * trap.xUm + transform.d! * trap.yUm + (transform.offsetY ?? 0),
-      };
-    }
-    const originX = transform?.originXUm ?? this.width / 2;
-    const originY = transform?.originYUm ?? this.height / 2;
-    const scaleX = transform?.scaleX ?? 1;
-    const scaleY = transform?.scaleY ?? 1;
-    const rotation = transform?.rotationRad ?? 0;
-    const x = trap.xUm * scaleX;
-    const y = trap.yUm * scaleY;
-    return {
-      x: originX + Math.cos(rotation) * x - Math.sin(rotation) * y,
-      y: originY - Math.sin(rotation) * x - Math.cos(rotation) * y,
-    };
+    return mapPhysicalPointToDftFrequency(trap, this.calibration, this.width, this.height);
   }
 
   private evaluateMetrics(
@@ -1168,7 +1135,6 @@ struct TargetState {
 @group(0) @binding(6) var<storage, read> acceptedPhase: array<f32>;
 @group(0) @binding(7) var<storage, read> amplitude: array<f32>;
 @group(0) @binding(8) var<storage, read_write> field: array<vec2<f32>>;
-@group(0) @binding(9) var<storage, read_write> constrained: array<vec2<f32>>;
 @group(0) @binding(10) var<storage, read> correction: array<f32>;
 @group(0) @binding(11) var<storage, read> inverseLut: array<f32>;
 @group(0) @binding(12) var<storage, read> decodeLut: array<f32>;
@@ -1182,6 +1148,8 @@ struct TargetState {
 var<workgroup> reductionSum: array<f32, ${WORKGROUP_SIZE}>;
 var<workgroup> reductionGhost: array<f32, ${WORKGROUP_SIZE}>;
 var<workgroup> reductionCode: array<f32, ${WORKGROUP_SIZE}>;
+var<workgroup> targetReductionReal: array<f32, ${EXACT_TARGET_WORKGROUP_SIZE}>;
+var<workgroup> targetReductionImag: array<f32, ${EXACT_TARGET_WORKGROUP_SIZE}>;
 
 fn wrap_phase(value: f32) -> f32 {
   let shifted = value + PI;
@@ -1203,24 +1171,6 @@ fn initialization_phase(index: u32) -> f32 {
   value = (value ^ (value >> 15u)) * 0x846ca68bu;
   value = value ^ (value >> 16u);
   return f32(value >> 8u) / 16777216.0 * TAU - PI;
-}
-
-fn clamped_index(x: i32, y: i32) -> u32 {
-  let clampedX = clamp(x, 0, i32(params.width) - 1);
-  let clampedY = clamp(y, 0, i32(params.height) - 1);
-  return u32(clampedY) * params.width + u32(clampedX);
-}
-
-fn sample_field(position: vec2<f32>) -> vec2<f32> {
-  let x0 = i32(floor(position.x));
-  let y0 = i32(floor(position.y));
-  let tx = position.x - floor(position.x);
-  let ty = position.y - floor(position.y);
-  let p00 = field[clamped_index(x0, y0)];
-  let p10 = field[clamped_index(x0 + 1, y0)];
-  let p01 = field[clamped_index(x0, y0 + 1)];
-  let p11 = field[clamped_index(x0 + 1, y0 + 1)];
-  return mix(mix(p00, p10, tx), mix(p01, p11, tx), ty);
 }
 
 @compute @workgroup_size(${TARGET_WORKGROUP_SIZE})
@@ -1276,13 +1226,50 @@ fn make_field(@builtin(global_invocation_id) gid: vec3<u32>) {
   field[index] = amplitude[index] * vec2<f32>(cos(phase[index]), sin(phase[index]));
 }
 
-@compute @workgroup_size(${TARGET_WORKGROUP_SIZE})
-fn sample_targets(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let index = gid.x;
-  if (index >= params.targetCount) { return; }
-  let measured = sample_field(targetInputs[index].position);
-  targetStates[index].measured = measured;
-  targetStates[index].intensity = dot(measured, measured);
+@compute @workgroup_size(${EXACT_TARGET_WORKGROUP_SIZE})
+fn sample_targets(
+  @builtin(local_invocation_id) lid: vec3<u32>,
+  @builtin(workgroup_id) workgroup: vec3<u32>,
+) {
+  let targetIndex = workgroup.x;
+  if (targetIndex >= params.targetCount) { return; }
+  let position = targetInputs[targetIndex].position;
+  let total = params.width * params.height;
+  var sum = vec2<f32>(0.0);
+  var compensation = vec2<f32>(0.0);
+  for (var index = lid.x; index < total; index = index + ${EXACT_TARGET_WORKGROUP_SIZE}u) {
+    let cycles = wrapped_dft_cycles(position.x, index % params.width, params.width)
+      + wrapped_dft_cycles(position.y, index / params.width, params.height);
+    let angle = wrap_phase(-TAU * cycles);
+    let factor = vec2<f32>(cos(angle), sin(angle));
+    let value = field[index];
+    let term = vec2<f32>(
+      value.x * factor.x - value.y * factor.y,
+      value.x * factor.y + value.y * factor.x,
+    );
+    let corrected = term - compensation;
+    let next = sum + corrected;
+    compensation = (next - sum) - corrected;
+    sum = next;
+  }
+  targetReductionReal[lid.x] = sum.x;
+  targetReductionImag[lid.x] = sum.y;
+  workgroupBarrier();
+  var stride = ${EXACT_TARGET_WORKGROUP_SIZE / 2}u;
+  loop {
+    if (stride == 0u) { break; }
+    if (lid.x < stride) {
+      targetReductionReal[lid.x] = targetReductionReal[lid.x] + targetReductionReal[lid.x + stride];
+      targetReductionImag[lid.x] = targetReductionImag[lid.x] + targetReductionImag[lid.x + stride];
+    }
+    workgroupBarrier();
+    stride = stride >> 1u;
+  }
+  if (lid.x == 0u) {
+    let measured = vec2<f32>(targetReductionReal[0], targetReductionImag[0]);
+    targetStates[targetIndex].measured = measured;
+    targetStates[targetIndex].intensity = dot(measured, measured);
+  }
 }
 
 @compute @workgroup_size(1)
@@ -1318,69 +1305,13 @@ fn update_weights(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 @compute @workgroup_size(${WORKGROUP_SIZE})
-fn copy_background(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn synthesize_phase(@builtin(global_invocation_id) gid: vec3<u32>) {
   let index = gid.x;
   if (index >= params.width * params.height) { return; }
-  constrained[index] = select(vec2<f32>(0.0), field[index], params.backgroundPreserve == 1u);
-  supportMask[index] = 0u;
-}
-
-@compute @workgroup_size(1)
-fn apply_constraints(@builtin(global_invocation_id) gid: vec3<u32>) {
-  if (gid.x != 0u) { return; }
-  for (var targetIndex = 0u; targetIndex < params.targetCount; targetIndex = targetIndex + 1u) {
-    let position = targetInputs[targetIndex].position;
-    let x0 = i32(floor(position.x));
-    let y0 = i32(floor(position.y));
-    constrained[clamped_index(x0, y0)] = vec2<f32>(0.0);
-    constrained[clamped_index(x0 + 1, y0)] = vec2<f32>(0.0);
-    constrained[clamped_index(x0, y0 + 1)] = vec2<f32>(0.0);
-    constrained[clamped_index(x0 + 1, y0 + 1)] = vec2<f32>(0.0);
-    for (var deltaY: i32 = -2; deltaY <= 2; deltaY = deltaY + 1) {
-      for (var deltaX: i32 = -2; deltaX <= 2; deltaX = deltaX + 1) {
-        let pixelX = x0 + deltaX;
-        let pixelY = y0 + deltaY;
-        let distance = vec2<f32>(f32(pixelX) - position.x, f32(pixelY) - position.y);
-        if (pixelX >= 0 && pixelY >= 0 && pixelX < i32(params.width) && pixelY < i32(params.height) && dot(distance, distance) <= 2.25) {
-          supportMask[u32(pixelY) * params.width + u32(pixelX)] = 1u;
-        }
-      }
-    }
-  }
+  var sum = vec2<f32>(0.0);
+  var compensation = vec2<f32>(0.0);
   for (var targetIndex = 0u; targetIndex < params.targetCount; targetIndex = targetIndex + 1u) {
     let item = targetInputs[targetIndex];
-    let position = item.position;
-    let x0 = i32(floor(position.x));
-    let y0 = i32(floor(position.y));
-    let tx = position.x - floor(position.x);
-    let ty = position.y - floor(position.y);
-    var indices: array<u32, 4>;
-    var weights: array<f32, 4>;
-    indices[0] = clamped_index(x0, y0);
-    indices[1] = clamped_index(x0 + 1, y0);
-    indices[2] = clamped_index(x0, y0 + 1);
-    indices[3] = clamped_index(x0 + 1, y0 + 1);
-    weights[0] = (1.0 - tx) * (1.0 - ty);
-    weights[1] = tx * (1.0 - ty);
-    weights[2] = (1.0 - tx) * ty;
-    weights[3] = tx * ty;
-    var combined: array<f32, 4>;
-    var unique: array<u32, 4>;
-    var norm = 0.0;
-    for (var entry = 0u; entry < 4u; entry = entry + 1u) {
-      unique[entry] = 1u;
-      for (var earlier = 0u; earlier < entry; earlier = earlier + 1u) {
-        if (indices[earlier] == indices[entry]) { unique[entry] = 0u; }
-      }
-      if (unique[entry] == 1u) {
-        var aggregate = 0.0;
-        for (var other = 0u; other < 4u; other = other + 1u) {
-          if (indices[other] == indices[entry]) { aggregate = aggregate + weights[other]; }
-        }
-        combined[entry] = aggregate;
-        norm = norm + aggregate * aggregate;
-      }
-    }
     var targetPhase = targetStates[targetIndex].targetPhase;
     let measured = targetStates[targetIndex].measured;
     let measuredPhase = atan2(measured.y, measured.x);
@@ -1390,25 +1321,65 @@ fn apply_constraints(@builtin(global_invocation_id) gid: vec3<u32>) {
       targetPhase = wrap_phase(targetPhase + 0.2 * wrap_phase(measuredPhase - targetPhase));
     }
     let targetAmplitude = targetStates[targetIndex].weight * item.desired;
-    let requested = targetAmplitude * vec2<f32>(cos(targetPhase), sin(targetPhase));
-    if (norm > 0.0) {
-      for (var entry = 0u; entry < 4u; entry = entry + 1u) {
-        if (unique[entry] == 1u) {
-          let pixel = indices[entry];
-          constrained[pixel] = constrained[pixel] + requested * combined[entry] / norm;
-        }
-      }
-    }
+    let cycles = wrapped_dft_cycles(item.position.x, index % params.width, params.width)
+      + wrapped_dft_cycles(item.position.y, index / params.width, params.height);
+    let angle = wrap_phase(TAU * cycles + targetPhase);
+    let term = targetAmplitude * vec2<f32>(cos(angle), sin(angle));
+    let corrected = term - compensation;
+    let next = sum + corrected;
+    compensation = (next - sum) - corrected;
+    sum = next;
+  }
+  if (dot(sum, sum) > params.epsilon * params.epsilon) {
+    phase[index] = atan2(sum.y, sum.x);
   }
 }
 
 @compute @workgroup_size(${WORKGROUP_SIZE})
-fn extract_phase(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn clear_support(@builtin(global_invocation_id) gid: vec3<u32>) {
   let index = gid.x;
   if (index >= params.width * params.height) { return; }
-  let value = constrained[index];
-  if (length(value) > params.epsilon) {
-    phase[index] = atan2(value.y, value.x);
+  supportMask[index] = 0u;
+}
+
+fn periodic_index(value: i32, extent: u32) -> u32 {
+  let signedExtent = i32(extent);
+  return u32(((value % signedExtent) + signedExtent) % signedExtent);
+}
+
+fn periodic_delta(pixel: f32, targetPosition: f32, extent: f32) -> f32 {
+  let direct = abs(pixel - targetPosition);
+  return min(direct, extent - direct);
+}
+
+fn periodic_position(value: f32, extent: f32) -> f32 {
+  return value - floor(value / extent) * extent;
+}
+
+@compute @workgroup_size(1)
+fn mark_support(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (gid.x != 0u) { return; }
+  for (var targetIndex = 0u; targetIndex < params.targetCount; targetIndex = targetIndex + 1u) {
+    let signedPosition = targetInputs[targetIndex].position;
+    let position = vec2<f32>(
+      periodic_position(signedPosition.x, f32(params.width)),
+      periodic_position(signedPosition.y, f32(params.height)),
+    );
+    let x0 = i32(floor(position.x));
+    let y0 = i32(floor(position.y));
+    for (var deltaY: i32 = -2; deltaY <= 2; deltaY = deltaY + 1) {
+      for (var deltaX: i32 = -2; deltaX <= 2; deltaX = deltaX + 1) {
+        let pixelX = periodic_index(x0 + deltaX, params.width);
+        let pixelY = periodic_index(y0 + deltaY, params.height);
+        let distance = vec2<f32>(
+          periodic_delta(f32(pixelX), position.x, f32(params.width)),
+          periodic_delta(f32(pixelY), position.y, f32(params.height)),
+        );
+        if (dot(distance, distance) <= 2.25) {
+          supportMask[pixelY * params.width + pixelX] = 1u;
+        }
+      }
+    }
   }
 }
 

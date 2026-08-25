@@ -3,7 +3,7 @@ import { SLM_CORE_WASM_BASE64, SLM_CORE_WASM_SHA256 } from "./wasm-binary.js";
 
 const WASM_PAGE_BYTES = 65_536;
 const MAX_WASM32_ADDRESS = 0xffff_ffff;
-const EXPECTED_ABI_VERSION = 1;
+const EXPECTED_ABI_VERSION = 2;
 
 interface CoreExports extends WebAssembly.Exports {
   memory: WebAssembly.Memory;
@@ -26,6 +26,32 @@ interface CoreExports extends WebAssembly.Exports {
     scratchRealPointer: number,
     scratchImagPointer: number,
     inverse: number,
+  ): number;
+  core_nudft_sample_targets(
+    fieldRealPointer: number,
+    fieldImagPointer: number,
+    width: number,
+    height: number,
+    targetXPointer: number,
+    targetYPointer: number,
+    targetCount: number,
+    outputRealPointer: number,
+    outputImagPointer: number,
+  ): number;
+  core_nudft_synthesize_phase(
+    targetXPointer: number,
+    targetYPointer: number,
+    targetAmplitudePointer: number,
+    targetPhasePointer: number,
+    targetCount: number,
+    width: number,
+    height: number,
+    phasePointer: number,
+    scratchRealPointer: number,
+    scratchImagPointer: number,
+    cancellationThreshold: number,
+    deterministicSeed: number,
+    deterministicFallback: number,
   ): number;
   core_hungarian_workspace_bytes(rows: number, columns: number): number;
   core_hungarian(
@@ -59,6 +85,7 @@ function instantiateCore(): { exports: CoreExports; byteLength: number } {
     const module = new WebAssembly.Module(bytes);
     const instance = new WebAssembly.Instance(module, {
       env: {
+        atan2: Math.atan2,
         cos: Math.cos,
         sin: Math.sin,
       },
@@ -159,6 +186,126 @@ export function wasmFft2d(
   imag.set(memory.subarray(imagPointer / 8, imagPointer / 8 + length));
 }
 
+/** Exact unnormalised 2D DFT values at arbitrary FFT-bin coordinates. */
+export function wasmNudftSampleTargets(
+  fieldReal: Float64Array,
+  fieldImag: Float64Array,
+  width: number,
+  height: number,
+  targetX: Float64Array,
+  targetY: Float64Array,
+): { real: Float64Array; imag: Float64Array } {
+  const pixelCount = checkedProduct(width, height);
+  if (fieldReal.length !== pixelCount || fieldImag.length !== pixelCount) {
+    throw new SlmError("INVALID_ARGUMENT", "NUDFT field dimensions do not match its buffers", {
+      stage: "SOLVING_SLM_FRAMES",
+      details: { width, height, realLength: fieldReal.length, imagLength: fieldImag.length },
+    });
+  }
+  if (targetX.length !== targetY.length) {
+    throw new SlmError("INVALID_ARGUMENT", "NUDFT target coordinate arrays have different lengths", {
+      stage: "SOLVING_SLM_FRAMES",
+    });
+  }
+  const targetCount = targetX.length;
+  const outputReal = new Float64Array(targetCount);
+  const outputImag = new Float64Array(targetCount);
+  if (targetCount === 0) return { real: outputReal, imag: outputImag };
+
+  const fieldBytes = checkedProduct(pixelCount, Float64Array.BYTES_PER_ELEMENT);
+  const targetBytes = checkedProduct(targetCount, Float64Array.BYTES_PER_ELEMENT);
+  const totalBytes = checkedSum(checkedProduct(fieldBytes, 2), checkedProduct(targetBytes, 4));
+  const base = reserveArena(totalBytes);
+  const fieldRealPointer = base;
+  const fieldImagPointer = fieldRealPointer + fieldBytes;
+  const targetXPointer = fieldImagPointer + fieldBytes;
+  const targetYPointer = targetXPointer + targetBytes;
+  const outputRealPointer = targetYPointer + targetBytes;
+  const outputImagPointer = outputRealPointer + targetBytes;
+  const memory = new Float64Array(core.memory.buffer);
+  memory.set(fieldReal, fieldRealPointer / 8);
+  memory.set(fieldImag, fieldImagPointer / 8);
+  memory.set(targetX, targetXPointer / 8);
+  memory.set(targetY, targetYPointer / 8);
+  const status = core.core_nudft_sample_targets(
+    fieldRealPointer,
+    fieldImagPointer,
+    width,
+    height,
+    targetXPointer,
+    targetYPointer,
+    targetCount,
+    outputRealPointer,
+    outputImagPointer,
+  );
+  assertCoreStatus(status, "NUDFT sampling");
+  outputReal.set(memory.subarray(outputRealPointer / 8, outputRealPointer / 8 + targetCount));
+  outputImag.set(memory.subarray(outputImagPointer / 8, outputImagPointer / 8 + targetCount));
+  return { real: outputReal, imag: outputImag };
+}
+
+/** Exact adjoint trap synthesis, writing the resulting phase in place. */
+export function wasmNudftSynthesizePhase(
+  targetX: Float64Array,
+  targetY: Float64Array,
+  targetAmplitude: Float64Array,
+  targetPhase: Float64Array,
+  width: number,
+  height: number,
+  phase: Float64Array,
+  cancellationThreshold: number,
+  deterministicSeed: number,
+  deterministicFallback: boolean,
+): void {
+  const targetCount = targetX.length;
+  if (targetY.length !== targetCount || targetAmplitude.length !== targetCount || targetPhase.length !== targetCount) {
+    throw new SlmError("INVALID_ARGUMENT", "NUDFT target arrays have different lengths", {
+      stage: "SOLVING_SLM_FRAMES",
+    });
+  }
+  const pixelCount = checkedProduct(width, height);
+  if (phase.length !== pixelCount) {
+    throw new SlmError("INVALID_ARGUMENT", "NUDFT phase dimensions do not match its buffer", {
+      stage: "SOLVING_SLM_FRAMES",
+      details: { width, height, phaseLength: phase.length },
+    });
+  }
+  const targetBytes = checkedProduct(targetCount, Float64Array.BYTES_PER_ELEMENT);
+  const fieldBytes = checkedProduct(pixelCount, Float64Array.BYTES_PER_ELEMENT);
+  const totalBytes = checkedSum(checkedProduct(targetBytes, 4), checkedProduct(fieldBytes, 3));
+  const base = reserveArena(totalBytes);
+  const targetXPointer = base;
+  const targetYPointer = targetXPointer + targetBytes;
+  const targetAmplitudePointer = targetYPointer + targetBytes;
+  const targetPhasePointer = targetAmplitudePointer + targetBytes;
+  const phasePointer = targetPhasePointer + targetBytes;
+  const scratchRealPointer = phasePointer + fieldBytes;
+  const scratchImagPointer = scratchRealPointer + fieldBytes;
+  const memory = new Float64Array(core.memory.buffer);
+  memory.set(targetX, targetXPointer / 8);
+  memory.set(targetY, targetYPointer / 8);
+  memory.set(targetAmplitude, targetAmplitudePointer / 8);
+  memory.set(targetPhase, targetPhasePointer / 8);
+  memory.set(phase, phasePointer / 8);
+  const status = core.core_nudft_synthesize_phase(
+    targetXPointer,
+    targetYPointer,
+    targetAmplitudePointer,
+    targetPhasePointer,
+    targetCount,
+    width,
+    height,
+    phasePointer,
+    scratchRealPointer,
+    scratchImagPointer,
+    cancellationThreshold,
+    deterministicSeed >>> 0,
+    deterministicFallback ? 1 : 0,
+  );
+  assertCoreStatus(status, "NUDFT synthesis");
+  phase.set(memory.subarray(phasePointer / 8, phasePointer / 8 + pixelCount));
+}
+
 export function wasmHungarianSolve(costMatrix: number[][]): { assignment: number[]; feasible: boolean } {
   const rows = costMatrix.length;
   const columns = costMatrix[0]?.length ?? 0;
@@ -246,7 +393,7 @@ function alignUp(value: number, alignment: number): number {
 function assertCoreStatus(status: number, operation: string): void {
   if (status === 0) return;
   throw new SlmError("INTERNAL_ERROR", `${operation} failed in the WebAssembly core`, {
-    stage: operation.startsWith("FFT") ? "SOLVING_SLM_FRAMES" : "ASSIGNING",
+    stage: operation.startsWith("FFT") || operation.startsWith("NUDFT") ? "SOLVING_SLM_FRAMES" : "ASSIGNING",
     details: { status },
   });
 }

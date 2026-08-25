@@ -15,6 +15,11 @@ import { DEFAULT_INITIAL_ATOMS, DEFAULT_TARGET_SITES } from "./data/defaults.js"
 import { cloneAtoms, cloneTargets } from "./lib/coordinates.js";
 import OpticalTweezersPage from "./pages/OpticalTweezersPage.vue";
 import {
+  DEFAULT_FOCAL_LENGTH_MM,
+  DEFAULT_PIXEL_PITCH_UM,
+  DEFAULT_WAVELENGTH_NM,
+} from "./lib/optical-calibration.js";
+import {
   DEFAULT_SLM_HEIGHT,
   DEFAULT_SLM_WIDTH,
   fftDimensionFor,
@@ -59,6 +64,9 @@ const slmWidth = ref(DEFAULT_SLM_WIDTH);
 const slmHeight = ref(DEFAULT_SLM_HEIGHT);
 const phaseMode = ref("Phase locked WGS");
 const computeBackend = ref<ComputeBackend>("wasm");
+const wavelengthNm = ref(DEFAULT_WAVELENGTH_NM);
+const focalLengthMm = ref(DEFAULT_FOCAL_LENGTH_MM);
+const pixelPitchUm = ref(DEFAULT_PIXEL_PITCH_UM);
 const webgpuAvailable = ref(false);
 const webgpuStatus = ref("CHECKING WEBGPU IN WORKER…");
 const running = ref(false);
@@ -178,6 +186,18 @@ function updateSlmHeight(value: number): void {
   } catch (error) {
     inputError.value = error instanceof Error ? error.message : "Invalid SLM height";
   }
+}
+
+function updateOpticalCalibration(field: "wavelength" | "focalLength" | "pixelPitch", value: number): void {
+  if (!Number.isFinite(value) || value <= 0) {
+    inputError.value = "Optical calibration values must be positive finite numbers";
+    return;
+  }
+  if (field === "wavelength") wavelengthNm.value = value;
+  else if (field === "focalLength") focalLengthMm.value = value;
+  else pixelPitchUm.value = value;
+  inputError.value = "";
+  invalidateSequence("Optical calibration changed");
 }
 
 function updatePhaseMode(value: string): void {
@@ -301,6 +321,11 @@ function compileSequence(): void {
       fftHeight: fftHeight.value,
       targetPhaseMode: phaseMode.value === "Soft phase locked" ? "SOFT_PHASE_LOCKED_WGS" : "PHASE_LOCKED_WGS",
       backend: computeBackend.value,
+      opticalCalibration: {
+        wavelengthNm: wavelengthNm.value,
+        focalLengthMm: focalLengthMm.value,
+        pixelPitchUm: pixelPitchUm.value,
+      },
     },
   };
   worker.postMessage(request);
@@ -465,6 +490,9 @@ function reset(): void {
   iterations.value = 4;
   slmWidth.value = DEFAULT_SLM_WIDTH;
   slmHeight.value = DEFAULT_SLM_HEIGHT;
+  wavelengthNm.value = DEFAULT_WAVELENGTH_NM;
+  focalLengthMm.value = DEFAULT_FOCAL_LENGTH_MM;
+  pixelPitchUm.value = DEFAULT_PIXEL_PITCH_UM;
   phaseMode.value = "Phase locked WGS";
   computeBackend.value = "wasm";
   inputError.value = "";
@@ -561,6 +589,9 @@ onBeforeUnmount(() => {
           :slm-height="slmHeight"
           :fft-width="fftWidth"
           :fft-height="fftHeight"
+          :wavelength-nm="wavelengthNm"
+          :focal-length-mm="focalLengthMm"
+          :pixel-pitch-um="pixelPitchUm"
           :phase-mode="phaseMode"
           :compute-backend="computeBackend"
           :webgpu-available="webgpuAvailable"
@@ -576,6 +607,9 @@ onBeforeUnmount(() => {
           @update:iterations="updateIterations"
           @update:slm-width="updateSlmWidth"
           @update:slm-height="updateSlmHeight"
+          @update:wavelength-nm="updateOpticalCalibration('wavelength', $event)"
+          @update:focal-length-mm="updateOpticalCalibration('focalLength', $event)"
+          @update:pixel-pitch-um="updateOpticalCalibration('pixelPitch', $event)"
           @update:phase-mode="updatePhaseMode"
           @update:compute-backend="updateComputeBackend"
           @compile="compileSequence"

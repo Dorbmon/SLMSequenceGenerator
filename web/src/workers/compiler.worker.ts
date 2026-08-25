@@ -8,6 +8,7 @@ import {
   type SequentialHologramBackend,
 } from "../../../src/index.js";
 import { opticalTweezersToFrame } from "../lib/tweezers.js";
+import { createOpticalCalibration } from "../lib/optical-calibration.js";
 import {
   inspectWebGpu,
   WebGpuSequentialWgsSolver,
@@ -160,48 +161,21 @@ async function generateTweezerFrame(jobId: number, input: TweezerFrameWorkerInpu
 }
 
 function sequenceCalibration(input: SequenceWorkerInput): CalibrationPackage {
-  const points = [...input.initialAtoms, ...input.targetSites];
-  const maximumX = Math.max(1, ...points.map((point) => Math.abs(point.xUm)));
-  const maximumY = Math.max(1, ...points.map((point) => Math.abs(point.yUm)));
-  return calibration(input.slmWidth, input.slmHeight, input.fftWidth, input.fftHeight, maximumX, maximumY, "browser-simulation");
+  return createOpticalCalibration({
+    activeWidth: input.slmWidth,
+    activeHeight: input.slmHeight,
+    fftWidth: input.fftWidth,
+    fftHeight: input.fftHeight,
+  }, input.opticalCalibration, "browser-sequence-optical-calibration");
 }
 
 function tweezerCalibration(input: TweezerFrameWorkerInput): CalibrationPackage {
-  const maximumX = Math.max(1, ...input.tweezers.map((tweezer) => Math.abs(tweezer.xUm)));
-  const maximumY = Math.max(1, ...input.tweezers.map((tweezer) => Math.abs(tweezer.yUm)));
-  return calibration(input.slmWidth, input.slmHeight, input.fftWidth, input.fftHeight, maximumX, maximumY, "browser-single-frame");
-}
-
-function calibration(
-  activeWidth: number,
-  activeHeight: number,
-  fftWidth: number,
-  fftHeight: number,
-  maximumX: number,
-  maximumY: number,
-  calibrationId: string,
-): CalibrationPackage {
-  const uniformScale = Math.min(
-    fftWidth * 0.4 / maximumX,
-    fftHeight * 0.4 / maximumY,
-  );
-  return {
-    manifest: {
-      calibrationId,
-      wavelengthNm: 1,
-      activeWidth,
-      activeHeight,
-      fftWidth,
-      fftHeight,
-      coordinateConvention: "+x right, +y up",
-    },
-    coordinateTransform: {
-      originXUm: fftWidth / 2,
-      originYUm: fftHeight / 2,
-      scaleX: uniformScale,
-      scaleY: uniformScale,
-    },
-  };
+  return createOpticalCalibration({
+    activeWidth: input.slmWidth,
+    activeHeight: input.slmHeight,
+    fftWidth: input.fftWidth,
+    fftHeight: input.fftHeight,
+  }, input.opticalCalibration, "browser-single-frame-optical-calibration");
 }
 
 function copySlmFrame(frame: Uint8Array | Uint16Array): SerializedSlmFrame {

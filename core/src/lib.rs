@@ -4,12 +4,13 @@ use core::panic::PanicInfo;
 use core::slice;
 
 const ASSIGNMENT_INFINITY: f64 = 1.0e30;
-const CORE_ABI_VERSION: u32 = 1;
+const CORE_ABI_VERSION: u32 = 2;
 
 #[link(wasm_import_module = "env")]
 extern "C" {
     fn sin(value: f64) -> f64;
     fn cos(value: f64) -> f64;
+    fn atan2(y: f64, x: f64) -> f64;
 }
 
 #[panic_handler]
@@ -142,6 +143,238 @@ pub unsafe extern "C" fn core_fft_2d(
         }
     }
     0
+}
+
+/// Evaluate the unnormalised two-dimensional discrete Fourier transform at
+/// arbitrary (including fractional) target frequencies.
+///
+/// The target coordinates are expressed in FFT-bin units. Integer coordinates
+/// therefore agree exactly with `core_fft_2d`, while fractional coordinates are
+/// evaluated directly instead of interpolating neighbouring FFT bins.
+///
+/// # Safety
+///
+/// The field pointers must each address `width * height` f64 values. Target and
+/// output pointers must each address `target_count` f64 values. Regions must be
+/// aligned and the two output regions must not overlap any input region.
+#[no_mangle]
+pub unsafe extern "C" fn core_nudft_sample_targets(
+    field_real_pointer: *const f64,
+    field_imag_pointer: *const f64,
+    width: u32,
+    height: u32,
+    target_x_pointer: *const f64,
+    target_y_pointer: *const f64,
+    target_count: u32,
+    output_real_pointer: *mut f64,
+    output_imag_pointer: *mut f64,
+) -> i32 {
+    let width = width as usize;
+    let height = height as usize;
+    let target_count = target_count as usize;
+    let Some(pixel_count) = width.checked_mul(height) else {
+        return -1;
+    };
+    if width == 0 || height == 0 {
+        return -1;
+    }
+    if target_count == 0 {
+        return 0;
+    }
+    if field_real_pointer.is_null()
+        || field_imag_pointer.is_null()
+        || target_x_pointer.is_null()
+        || target_y_pointer.is_null()
+        || output_real_pointer.is_null()
+        || output_imag_pointer.is_null()
+    {
+        return -1;
+    }
+
+    let field_real = slice::from_raw_parts(field_real_pointer, pixel_count);
+    let field_imag = slice::from_raw_parts(field_imag_pointer, pixel_count);
+    let target_x = slice::from_raw_parts(target_x_pointer, target_count);
+    let target_y = slice::from_raw_parts(target_y_pointer, target_count);
+    let output_real = slice::from_raw_parts_mut(output_real_pointer, target_count);
+    let output_imag = slice::from_raw_parts_mut(output_imag_pointer, target_count);
+    let tau = 2.0 * core::f64::consts::PI;
+
+    for target in 0..target_count {
+        let frequency_x = principal_frequency(target_x[target], width);
+        let frequency_y = principal_frequency(target_y[target], height);
+        if !frequency_x.is_finite() || !frequency_y.is_finite() {
+            return -2;
+        }
+        let angle_x = -tau * frequency_x / width as f64;
+        let angle_y = -tau * frequency_y / height as f64;
+        let root_x_real = cos(angle_x);
+        let root_x_imag = sin(angle_x);
+        let root_y_real = cos(angle_y);
+        let root_y_imag = sin(angle_y);
+        let mut row_real = 1.0;
+        let mut row_imag = 0.0;
+        let mut sum_real = 0.0;
+        let mut sum_imag = 0.0;
+
+        for y in 0..height {
+            let mut factor_real = row_real;
+            let mut factor_imag = row_imag;
+            let row_offset = y * width;
+            for x in 0..width {
+                let index = row_offset + x;
+                sum_real += field_real[index] * factor_real - field_imag[index] * factor_imag;
+                sum_imag += field_real[index] * factor_imag + field_imag[index] * factor_real;
+                let next_real = factor_real * root_x_real - factor_imag * root_x_imag;
+                factor_imag = factor_real * root_x_imag + factor_imag * root_x_real;
+                factor_real = next_real;
+            }
+            let next_row_real = row_real * root_y_real - row_imag * root_y_imag;
+            row_imag = row_real * root_y_imag + row_imag * root_y_real;
+            row_real = next_row_real;
+        }
+        output_real[target] = sum_real;
+        output_imag[target] = sum_imag;
+    }
+    0
+}
+
+/// Apply the exact adjoint trap-domain transform and retain only its phase.
+/// `target_amplitude` is the desired field amplitude after WGS weighting and
+/// `target_phase` is the requested complex-field phase at each target.
+///
+/// When the coherent sum is below `cancellation_threshold`, the prior phase is
+/// retained unless `deterministic_fallback` is non-zero, in which case the
+/// seeded deterministic initial phase is used.
+///
+/// # Safety
+///
+/// Target pointers must each address `target_count` f64 values. `phase`,
+/// `scratch_real`, and `scratch_imag` must each address `width * height` f64
+/// values and must not overlap.
+#[no_mangle]
+pub unsafe extern "C" fn core_nudft_synthesize_phase(
+    target_x_pointer: *const f64,
+    target_y_pointer: *const f64,
+    target_amplitude_pointer: *const f64,
+    target_phase_pointer: *const f64,
+    target_count: u32,
+    width: u32,
+    height: u32,
+    phase_pointer: *mut f64,
+    scratch_real_pointer: *mut f64,
+    scratch_imag_pointer: *mut f64,
+    cancellation_threshold: f64,
+    deterministic_seed: u32,
+    deterministic_fallback: u32,
+) -> i32 {
+    let width = width as usize;
+    let height = height as usize;
+    let target_count = target_count as usize;
+    let Some(pixel_count) = width.checked_mul(height) else {
+        return -1;
+    };
+    if width == 0 || height == 0 || phase_pointer.is_null() {
+        return -1;
+    }
+    if scratch_real_pointer.is_null() || scratch_imag_pointer.is_null() {
+        return -1;
+    }
+    if target_count > 0
+        && (target_x_pointer.is_null()
+            || target_y_pointer.is_null()
+            || target_amplitude_pointer.is_null()
+            || target_phase_pointer.is_null())
+    {
+        return -1;
+    }
+
+    let phase = slice::from_raw_parts_mut(phase_pointer, pixel_count);
+    let scratch_real = slice::from_raw_parts_mut(scratch_real_pointer, pixel_count);
+    let scratch_imag = slice::from_raw_parts_mut(scratch_imag_pointer, pixel_count);
+    scratch_real.fill(0.0);
+    scratch_imag.fill(0.0);
+    if target_count == 0 {
+        if deterministic_fallback != 0 {
+            phase.fill(0.0);
+        }
+        return 0;
+    }
+
+    let target_x = slice::from_raw_parts(target_x_pointer, target_count);
+    let target_y = slice::from_raw_parts(target_y_pointer, target_count);
+    let target_amplitude = slice::from_raw_parts(target_amplitude_pointer, target_count);
+    let target_phase = slice::from_raw_parts(target_phase_pointer, target_count);
+    let tau = 2.0 * core::f64::consts::PI;
+
+    for target in 0..target_count {
+        let frequency_x = principal_frequency(target_x[target], width);
+        let frequency_y = principal_frequency(target_y[target], height);
+        let amplitude = target_amplitude[target];
+        let initial_phase = target_phase[target];
+        if !frequency_x.is_finite()
+            || !frequency_y.is_finite()
+            || !amplitude.is_finite()
+            || !initial_phase.is_finite()
+        {
+            return -2;
+        }
+        let angle_x = tau * frequency_x / width as f64;
+        let angle_y = tau * frequency_y / height as f64;
+        let root_x_real = cos(angle_x);
+        let root_x_imag = sin(angle_x);
+        let root_y_real = cos(angle_y);
+        let root_y_imag = sin(angle_y);
+        let mut row_real = cos(initial_phase) * amplitude;
+        let mut row_imag = sin(initial_phase) * amplitude;
+
+        for y in 0..height {
+            let mut factor_real = row_real;
+            let mut factor_imag = row_imag;
+            let row_offset = y * width;
+            for x in 0..width {
+                let index = row_offset + x;
+                scratch_real[index] += factor_real;
+                scratch_imag[index] += factor_imag;
+                let next_real = factor_real * root_x_real - factor_imag * root_x_imag;
+                factor_imag = factor_real * root_x_imag + factor_imag * root_x_real;
+                factor_real = next_real;
+            }
+            let next_row_real = row_real * root_y_real - row_imag * root_y_imag;
+            row_imag = row_real * root_y_imag + row_imag * root_y_real;
+            row_real = next_row_real;
+        }
+    }
+
+    let threshold_squared = cancellation_threshold.max(0.0) * cancellation_threshold.max(0.0);
+    for index in 0..pixel_count {
+        let magnitude_squared =
+            scratch_real[index] * scratch_real[index] + scratch_imag[index] * scratch_imag[index];
+        if magnitude_squared > threshold_squared {
+            phase[index] = atan2(scratch_imag[index], scratch_real[index]);
+        } else if deterministic_fallback != 0 {
+            phase[index] = deterministic_phase(index as u32, deterministic_seed);
+        }
+    }
+    0
+}
+
+fn principal_frequency(position: f64, extent: usize) -> f64 {
+    let period = extent as f64;
+    let mut frequency = position % period;
+    if frequency > period * 0.5 {
+        frequency -= period;
+    } else if frequency < -period * 0.5 {
+        frequency += period;
+    }
+    frequency
+}
+
+fn deterministic_phase(index: u32, seed: u32) -> f64 {
+    let mut value = (index ^ seed).wrapping_add(1);
+    value = (value ^ (value >> 16)).wrapping_mul(0x7feb352d);
+    value = (value ^ (value >> 15)).wrapping_mul(0x846ca68b);
+    value ^= value >> 16;
+    ((value >> 8) as f64 / 16_777_216.0) * (2.0 * core::f64::consts::PI) - core::f64::consts::PI
 }
 
 #[no_mangle]

@@ -50,6 +50,8 @@ const requiredExports = [
   "core_abi_version",
   "core_fft_1d",
   "core_fft_2d",
+  "core_nudft_sample_targets",
+  "core_nudft_synthesize_phase",
   "core_hungarian",
   "core_hungarian_workspace_bytes",
 ];
@@ -57,7 +59,7 @@ for (const name of requiredExports) {
   if (!exports.has(name)) throw new Error(`Compiled Wasm core is missing export: ${name}`);
 }
 const imports = WebAssembly.Module.imports(module);
-if (imports.some((entry) => entry.module !== "env" || (entry.name !== "cos" && entry.name !== "sin"))) {
+if (imports.some((entry) => entry.module !== "env" || !["atan2", "cos", "sin"].includes(entry.name))) {
   throw new Error(`Compiled Wasm core has an unexpected import: ${JSON.stringify(imports)}`);
 }
 const base64 = bytes.toString("base64");
