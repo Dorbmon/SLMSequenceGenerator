@@ -1,113 +1,17 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#08110f">
     <meta name="description" content="SLM sequence compiler workspace.">
     <title>SLM Sequence Compiler</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css">
   </head>
   <body>
-    <main class="app-shell">
-      <header class="topbar">
-        <a class="brand" href="/" aria-label="SLM compiler home">
-          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
-          <span>SLM COMPILER</span>
-        </a>
-        <div class="topbar-status"><span class="status-dot"></span> READY / REFERENCE BUILD</div>
-        <button class="reset-button" id="resetButton" type="button">Reset</button>
-      </header>
-
-      <section class="workspace">
-        <div class="workspace-heading">
-          <div>
-            <p class="eyebrow">Sequence workspace</p>
-            <h1>Compile rearrangement</h1>
-          </div>
-          <p class="heading-note">Initial atoms to target sites<br>with collision-free phase frames.</p>
-        </div>
-
-        <div class="workspace-grid">
-          <section class="preview panel">
-            <div class="panel-bar">
-              <span><b class="live-pulse"></b> ARRAY PREVIEW</span>
-              <span class="frame-counter" id="frameCounter">FRAME 00 / 64</span>
-            </div>
-            <div class="canvas-wrap">
-              <canvas id="arrayCanvas" width="760" height="540" aria-label="Atom rearrangement preview"></canvas>
-              <div class="canvas-label"><span id="canvasState">READY</span><span>UM PLANE / TOP VIEW</span></div>
-            </div>
-            <div class="preview-footer">
-              <span><small>SOURCE</small> <span id="sourceCount">12</span> occupied</span>
-              <span><small>TARGET</small> <span id="targetCount">09</span> required</span>
-              <span><small>MODE</small> OFFLINE / SAFE</span>
-            </div>
-          </section>
-
-          <section class="controls panel" aria-labelledby="controls-title">
-            <div class="panel-bar"><span class="panel-kicker">INPUT / OUTPUT</span><span class="valid-badge" id="validBadge">VALIDATED</span></div>
-            <h2 id="controls-title">Compiler controls</h2>
-            <p class="control-description">Set the safety margin and solver budget, then compile the complete offline sequence.</p>
-
-            <div class="control-block">
-              <div class="control-label"><span>MINIMUM SEPARATION</span><output id="separationValue">1.2 um</output></div>
-              <input id="separationRange" type="range" min="0.8" max="5" step="0.1" value="1.2">
-            </div>
-            <div class="control-block">
-              <div class="control-label"><span>WGS ITERATIONS</span><output id="iterationValue">04 / FRAME</output></div>
-              <input id="iterationRange" type="range" min="2" max="12" step="1" value="4">
-            </div>
-            <div class="select-row">
-              <label>ASSIGNMENT
-                <select id="assignmentMode"><option>Hungarian / squared distance</option><option>Hungarian / weighted obstacles</option></select>
-              </label>
-              <label>PHASE MODE
-                <select id="phaseMode"><option>Phase locked WGS</option><option>Soft phase locked</option></select>
-              </label>
-            </div>
-            <div class="compile-log" aria-live="polite">
-              <div class="log-row"><span>01</span><span id="logOne">Awaiting input arrays</span><b>&bull;</b></div>
-              <div class="log-row"><span>02</span><span id="logTwo">No conflicts detected</span><b>&bull;</b></div>
-              <div class="log-row"><span>03</span><span id="logThree">Hologram state is idle</span><b>&bull;</b></div>
-            </div>
-            <button class="compile-button" id="compileButton" type="button"><span></span> Compile sequence</button>
-            <button class="step-button" id="stepButton" type="button">Step one frame <b aria-hidden="true">&#8594;</b></button>
-            <button class="export-button" id="exportButton" type="button" disabled>Export SLM frames <b aria-hidden="true">&#8595;</b></button>
-            <button class="export-button secondary-export" id="manifestButton" type="button" disabled>Export manifest <b aria-hidden="true">&#8595;</b></button>
-          </section>
-        </div>
-
-        <section class="data-panel panel" aria-labelledby="data-title">
-          <div class="panel-bar"><span class="panel-kicker" id="data-title">COORDINATES / JSON</span><span class="data-format">ARRAYS OR POINT OBJECTS</span></div>
-          <div class="data-grid">
-            <label class="editor-block">INITIAL ATOMS
-              <textarea id="initialEditor" spellcheck="false" aria-label="Initial atom coordinates"></textarea>
-              <span class="editor-actions"><button class="upload-button" id="initialUploadButton" type="button">Upload JSON</button><input id="initialUpload" type="file" accept="application/json,.json" hidden></span>
-            </label>
-            <label class="editor-block">TARGET SITES
-              <textarea id="targetEditor" spellcheck="false" aria-label="Target site coordinates"></textarea>
-              <span class="editor-actions"><button class="upload-button" id="targetUploadButton" type="button">Upload JSON</button><input id="targetUpload" type="file" accept="application/json,.json" hidden></span>
-            </label>
-          </div>
-          <div class="data-footer">
-            <div class="data-help">Use <code>[xUm, yUm]</code> or <code>{"xUm": 0, "yUm": 0}</code>. Coordinates use +x right and +y up.</div>
-            <div class="data-actions"><button class="upload-button request-button" id="requestUploadButton" type="button">Import request</button><input id="requestUpload" type="file" accept="application/json,.json" hidden><button class="apply-button" id="applyButton" type="button">Apply coordinates</button></div>
-          </div>
-          <p class="input-error" id="inputError" role="alert"></p>
-        </section>
-
-        <div class="metrics-row" aria-label="Sequence metrics">
-          <div><small>TRAP FRAMES</small><strong id="metricFrames">--</strong></div>
-          <div><small>MIN CLEARANCE / UM</small><strong id="metricClearance">1.2</strong></div>
-          <div><small>DIFFRACTION EFFICIENCY</small><strong id="metricEfficiency">--</strong></div>
-          <div><small>ASSIGNMENT COST</small><strong id="metricCost">--</strong></div>
-        </div>
-      </section>
-    </main>
-    <script src="app.js?v=2" type="module"></script>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

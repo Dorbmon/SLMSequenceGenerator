@@ -1,9 +1,10 @@
 # SLM Sequence Compiler
 
-This repository contains a dependency-free TypeScript reference implementation
-of the pipeline in `design.md`. It is intentionally scalar and suitable for
-native or browser reference tests; an FFT/Wasm backend can be substituted
-behind the exported stage interfaces later.
+This repository contains the TypeScript orchestration layer and a dependency-free
+Rust/WebAssembly numerical core for the pipeline in `design.md`. Assignment and
+one- and two-dimensional FFTs execute over packed arrays in Wasm linear memory;
+validation, planning orchestration, storage, and the public API remain in
+TypeScript.
 
 ```ts
 import { SlmSequenceCompiler } from "slm-sequence-compiler";
@@ -18,6 +19,28 @@ const sequence = await compiler.compileRearrangement({
 
 The compiler keeps frame data in `MemoryFrameStore` by default. A caller can
 provide another store implementing the exported `FrameStore` interface.
+
+`getWasmCoreInfo()` reports the loaded core ABI and build identifier. The Wasm
+bytes are embedded in the JavaScript output so the synchronous numerical API
+works in Node and browsers without a separate fetch. Package builds also emit
+`wasm/slm_core.wasm`. Building from source requires Rust with the
+`wasm32-unknown-unknown` target:
+
+```sh
+rustup target add wasm32-unknown-unknown
+npm run build
+```
+
+The browser workspace includes a snapping visual coordinate editor for adding,
+moving, inspecting, and removing initial atoms and target sites. Every visual
+change is reflected in the JSON inputs, which remain available for direct edits
+and imports.
+
+The workspace is a Vue 3 single-page application built with Vite. Run it locally
+with `npm run dev`, create the production site in `web-dist/` with
+`npm run build:web`, or inspect that production build with `npm run preview`.
+Cloudflare Workers static-assets deployment uses the same `web-dist/` output via
+`npm run deploy`.
 
 Measured runs must provide a calibration package with a phase-response or
 inverse phase LUT. Set `simulationMode: true` only for the synthetic identity

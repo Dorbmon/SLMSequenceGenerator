@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   SlmSequenceCompiler,
+  createComplexField,
   createSequencePackage,
   decodeTrapFrames,
   fft1d,
+  fft2d,
+  getWasmCoreInfo,
   hungarianSolve,
   verifySequencePackage,
   verifySequencePackageFiles,
@@ -45,9 +48,16 @@ test("Hungarian solver returns a known optimum", () => {
   const result = hungarianSolve([[4, 1, 3], [2, 0, 5], [3, 2, 2]]);
   assert.deepEqual(result.assignment, [1, 0, 2]);
   assert.equal(result.cost, 5);
+  assert.deepEqual(hungarianSolve([[4, 1, 3], [2, 0, 5]]).assignment, [1, 0]);
+  assert.equal(hungarianSolve([[1], [2]]).feasible, false);
 });
 
-test("reference FFT round trips", () => {
+test("Wasm FFT round trips power-of-two, non-power-of-two, and 2-D fields", () => {
+  const core = getWasmCoreInfo();
+  assert.equal(core.backend, "webassembly");
+  assert.match(core.buildId, /^rust-wasm-core-abi1-[0-9a-f]{12}$/);
+  assert.equal(core.abiVersion, 1);
+  assert.ok(core.moduleBytes > 0);
   const real = new Float64Array([1, 2, 3, 4]);
   const imag = new Float64Array(4);
   const original = [...real];
@@ -55,6 +65,25 @@ test("reference FFT round trips", () => {
   fft1d(real, imag, true);
   assert.deepEqual([...real].map((value) => Math.round(value * 1e10) / 1e10), original);
   assert.ok([...imag].every((value) => Math.abs(value) < 1e-9));
+
+  const nonPowerReal = new Float64Array([1, -2, 3, -4, 5]);
+  const nonPowerImag = new Float64Array([0.5, 0, -0.5, 1, -1]);
+  const nonPowerOriginalReal = new Float64Array(nonPowerReal);
+  const nonPowerOriginalImag = new Float64Array(nonPowerImag);
+  fft1d(nonPowerReal, nonPowerImag);
+  fft1d(nonPowerReal, nonPowerImag, true);
+  assertArrayClose(nonPowerReal, nonPowerOriginalReal);
+  assertArrayClose(nonPowerImag, nonPowerOriginalImag);
+
+  const field = createComplexField(3, 5);
+  field.real.set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+  field.imag.set([0, 1, 0, -1, 0, 1, 0, -1, 0, 1, 0, -1, 0, 1, 0]);
+  const fieldOriginalReal = new Float64Array(field.real);
+  const fieldOriginalImag = new Float64Array(field.imag);
+  fft2d(field);
+  fft2d(field, true);
+  assertArrayClose(field.real, fieldOriginalReal);
+  assertArrayClose(field.imag, fieldOriginalImag);
 });
 
 test("compiles an identity sequence and exports checksummed frames", async () => {
@@ -64,6 +93,7 @@ test("compiles an identity sequence and exports checksummed frames", async () =>
     targetSites: [{ siteId: 2, xUm: 0, yUm: 0 }],
     calibrationId: "test-calibration",
   });
+  assert.equal(sequence.manifest.wasmBuildId, getWasmCoreInfo().buildId);
   assert.equal(sequence.validation.accepted, true);
   assert.equal(sequence.trapFrameStore.length, sequence.slmFrameStore.length);
   assert.equal(verifySequencePackage(sequence).valid, true);
@@ -133,3 +163,10 @@ test("rejects malformed geometry and calibration references", async () => {
     (error) => error.code === "CALIBRATION_MISMATCH",
   );
 });
+
+function assertArrayClose(actual, expected, tolerance = 1e-9) {
+  assert.equal(actual.length, expected.length);
+  for (let index = 0; index < actual.length; index += 1) {
+    assert.ok(Math.abs(actual[index] - expected[index]) <= tolerance, `index ${index}: ${actual[index]} != ${expected[index]}`);
+  }
+}

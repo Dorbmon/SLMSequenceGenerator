@@ -1,4 +1,5 @@
 import { SlmError } from "./errors.js";
+import { wasmFft1d, wasmFft2d } from "./wasm-core.js";
 
 export interface ComplexField {
   real: Float64Array;
@@ -16,76 +17,18 @@ export function createComplexField(width: number, height: number): ComplexField 
 
 export function fft1d(real: Float64Array, imag: Float64Array, inverse = false): void {
   if (real.length !== imag.length) throw new SlmError("INVALID_ARGUMENT", "FFT real and imaginary lengths differ", { stage: "SOLVING_SLM_FRAMES" });
-  if (real.length === 0) return;
-  if ((real.length & (real.length - 1)) !== 0) {
-    dft1d(real, imag, inverse);
-    return;
-  }
-  bitReversePermutation(real, imag);
-  for (let size = 2; size <= real.length; size <<= 1) {
-    const half = size >>> 1;
-    const sign = inverse ? 1 : -1;
-    const angle = sign * (2 * Math.PI / size);
-    const rootReal = Math.cos(angle);
-    const rootImag = Math.sin(angle);
-    for (let offset = 0; offset < real.length; offset += size) {
-      let twiddleReal = 1;
-      let twiddleImag = 0;
-      for (let index = 0; index < half; index += 1) {
-        const even = offset + index;
-        const odd = even + half;
-        const productReal = real[odd]! * twiddleReal - imag[odd]! * twiddleImag;
-        const productImag = real[odd]! * twiddleImag + imag[odd]! * twiddleReal;
-        const evenReal = real[even]!;
-        const evenImag = imag[even]!;
-        real[even] = evenReal + productReal;
-        imag[even] = evenImag + productImag;
-        real[odd] = evenReal - productReal;
-        imag[odd] = evenImag - productImag;
-        const nextTwiddleReal = twiddleReal * rootReal - twiddleImag * rootImag;
-        twiddleImag = twiddleReal * rootImag + twiddleImag * rootReal;
-        twiddleReal = nextTwiddleReal;
-      }
-    }
-  }
-  if (inverse) {
-    const scale = 1 / real.length;
-    for (let index = 0; index < real.length; index += 1) {
-      real[index] = real[index]! * scale;
-      imag[index] = imag[index]! * scale;
-    }
-  }
+  wasmFft1d(real, imag, inverse);
 }
 
 export function fft2d(field: ComplexField, inverse = false): void {
   const { width, height, real, imag } = field;
-  const rowReal = new Float64Array(width);
-  const rowImag = new Float64Array(width);
-  for (let y = 0; y < height; y += 1) {
-    const rowOffset = y * width;
-    for (let x = 0; x < width; x += 1) {
-      rowReal[x] = real[rowOffset + x]!;
-      rowImag[x] = imag[rowOffset + x]!;
-    }
-    fft1d(rowReal, rowImag, inverse);
-    for (let x = 0; x < width; x += 1) {
-      real[rowOffset + x] = rowReal[x]!;
-      imag[rowOffset + x] = rowImag[x]!;
-    }
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
+    throw new SlmError("INVALID_ARGUMENT", "Complex field dimensions must be positive integers", { stage: "SOLVING_SLM_FRAMES" });
   }
-  const columnReal = new Float64Array(height);
-  const columnImag = new Float64Array(height);
-  for (let x = 0; x < width; x += 1) {
-    for (let y = 0; y < height; y += 1) {
-      columnReal[y] = real[y * width + x]!;
-      columnImag[y] = imag[y * width + x]!;
-    }
-    fft1d(columnReal, columnImag, inverse);
-    for (let y = 0; y < height; y += 1) {
-      real[y * width + x] = columnReal[y]!;
-      imag[y * width + x] = columnImag[y]!;
-    }
+  if (real.length !== width * height || imag.length !== width * height) {
+    throw new SlmError("INVALID_ARGUMENT", "Complex field data does not match its dimensions", { stage: "SOLVING_SLM_FRAMES" });
   }
+  wasmFft2d(real, imag, width, height, inverse);
 }
 
 export function cloneComplexField(field: ComplexField): ComplexField {
@@ -174,43 +117,6 @@ export function fieldPower(field: ComplexField): Float64Array {
   const power = new Float64Array(field.real.length);
   for (let index = 0; index < power.length; index += 1) power[index] = field.real[index]! ** 2 + field.imag[index]! ** 2;
   return power;
-}
-
-function bitReversePermutation(real: Float64Array, imag: Float64Array): void {
-  let reversed = 0;
-  for (let index = 1; index < real.length; index += 1) {
-    let bit = real.length >>> 1;
-    while (reversed & bit) {
-      reversed ^= bit;
-      bit >>>= 1;
-    }
-    reversed ^= bit;
-    if (index < reversed) {
-      [real[index], real[reversed]] = [real[reversed]!, real[index]!];
-      [imag[index], imag[reversed]] = [imag[reversed]!, imag[index]!];
-    }
-  }
-}
-
-function dft1d(real: Float64Array, imag: Float64Array, inverse: boolean): void {
-  const inputReal = new Float64Array(real);
-  const inputImag = new Float64Array(imag);
-  const sign = inverse ? 1 : -1;
-  const size = real.length;
-  for (let output = 0; output < size; output += 1) {
-    let sumReal = 0;
-    let sumImag = 0;
-    for (let input = 0; input < size; input += 1) {
-      const angle = sign * 2 * Math.PI * output * input / size;
-      const cosine = Math.cos(angle);
-      const sine = Math.sin(angle);
-      sumReal += inputReal[input]! * cosine - inputImag[input]! * sine;
-      sumImag += inputReal[input]! * sine + inputImag[input]! * cosine;
-    }
-    const scale = inverse ? 1 / size : 1;
-    real[output] = sumReal * scale;
-    imag[output] = sumImag * scale;
-  }
 }
 
 function fieldValue(field: ComplexField, x: number, y: number): { real: number; imag: number } {

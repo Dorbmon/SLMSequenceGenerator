@@ -11,20 +11,34 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist", "README.md"],
+  "files": [
+    "dist",
+    "wasm",
+    "README.md"
+  ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "build:web": "esbuild src/index.ts --bundle --format=esm --platform=browser --outfile=web/compiler.js",
-    "dev": "npx wrangler dev --config wrangler.jsonc",
-    "deploy": "npm run build:web && npx wrangler deploy --config wrangler.jsonc"
+    "build:wasm": "node scripts/build-wasm.mjs",
+    "build:lib": "tsc -p tsconfig.json",
+    "build": "npm run build:wasm && npm run build:lib && vite build",
+    "test": "npm run build:wasm && npm run build:lib && node --test test/*.test.js && vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit && vue-tsc -p web/tsconfig.json --noEmit",
+    "build:web": "npm run build:wasm && vite build",
+    "dev": "npm run build:wasm && vite",
+    "preview": "vite preview",
+    "deploy": "npm run build:web && wrangler deploy --config wrangler.jsonc"
   },
   "devDependencies": {
-    "esbuild": "^0.25.0",
-    "typescript": "^5.8.3"
+    "@vitejs/plugin-vue": "^6.0.8",
+    "typescript": "^5.9.3",
+    "vite": "^8.2.2",
+    "vitest": "^4.1.11",
+    "vue-tsc": "^3.3.11",
+    "wrangler": "^4.125.0"
   },
   "engines": {
-    "node": ">=20"
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "dependencies": {
+    "vue": "^3.5.41"
   }
 }

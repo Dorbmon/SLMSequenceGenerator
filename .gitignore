@@ -3,3 +3,5 @@ dist/
 .wrangler/
 .dev.vars*
 .env*
+core/target/
+web-dist/

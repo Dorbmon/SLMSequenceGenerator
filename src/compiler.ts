@@ -22,6 +22,7 @@ import type {
   TrapFrame,
 } from "./types.js";
 import { hashValue } from "./util.js";
+import { WASM_CORE_BUILD_ID } from "./wasm-core.js";
 
 export class SlmSequenceCompiler {
   private disposed = false;
@@ -256,7 +257,7 @@ export class SlmSequenceCompiler {
       formatVersion: "1.1",
       creationTimestamp: this.config.creationTimestamp ?? "1970-01-01T00:00:00.000Z",
       compilerVersion: this.config.compilerVersion ?? "0.1.0",
-      wasmBuildId: this.config.wasmBuildId ?? "typescript-reference",
+      wasmBuildId: this.config.wasmBuildId ?? WASM_CORE_BUILD_ID,
       inputHash: hashValue(descriptors),
       calibrationId: calibration.manifest.calibrationId,
       calibrationHash: calibrationHash(calibration),
@@ -270,7 +271,7 @@ export class SlmSequenceCompiler {
       assignmentAttempts: 1,
       plannerBackend: "none",
       plannerParameters: {},
-      wgsBackend: "scalar-phase-locked-wgs",
+      wgsBackend: "wasm-fft-phase-locked-wgs",
       wgsParameters: {
         targetPhaseMode: normalized.hologramConfig.targetPhaseMode,
         firstFrameIterations: normalized.hologramConfig.firstFrameIterations,
@@ -385,7 +386,7 @@ function makeManifest(
     formatVersion: "1.1",
     creationTimestamp: compilerConfig.creationTimestamp ?? "1970-01-01T00:00:00.000Z",
     compilerVersion: compilerConfig.compilerVersion ?? "0.1.0",
-    wasmBuildId: compilerConfig.wasmBuildId ?? "typescript-reference",
+    wasmBuildId: compilerConfig.wasmBuildId ?? WASM_CORE_BUILD_ID,
     inputHash: inputHash(request, normalized),
     calibrationId: normalized.calibration.manifest.calibrationId,
     calibrationHash: calibrationHash(normalized.calibration),
@@ -404,7 +405,7 @@ function makeManifest(
       waitCount: motionPlan.waitCount,
       detourCount: motionPlan.detourCount,
     },
-    wgsBackend: "scalar-phase-locked-wgs",
+    wgsBackend: "wasm-fft-phase-locked-wgs",
     wgsParameters: {
       targetPhaseMode: normalized.hologramConfig.targetPhaseMode,
       firstFrameIterations: normalized.hologramConfig.firstFrameIterations,

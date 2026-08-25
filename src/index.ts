@@ -11,3 +11,5 @@ export * from "./hologram.js";
 export * from "./frame-store.js";
 export * from "./storage.js";
 export * from "./compiler.js";
+export { WASM_CORE_BUILD_ID, getWasmCoreInfo } from "./wasm-core.js";
+export type { WasmCoreInfo } from "./wasm-core.js";

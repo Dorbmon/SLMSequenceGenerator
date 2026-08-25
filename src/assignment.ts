@@ -14,6 +14,7 @@ import type {
   StaticTrap,
   TargetSite,
 } from "./types.js";
+import { wasmHungarianSolve } from "./wasm-core.js";
 
 export const ASSIGNMENT_INFINITY = 1e30;
 
@@ -51,62 +52,10 @@ export function hungarianSolve(costMatrix: number[][]): HungarianResult {
     return { assignment: Array(rows).fill(-1), cost: Number.POSITIVE_INFINITY, feasible: false };
   }
 
-  // Potentials-and-augmenting-path implementation of the Hungarian method.
-  const u = Array(rows + 1).fill(0) as number[];
-  const v = Array(columns + 1).fill(0) as number[];
-  const p = Array(columns + 1).fill(0) as number[];
-  const way = Array(columns + 1).fill(0) as number[];
-
-  for (let row = 1; row <= rows; row += 1) {
-    p[0] = row;
-    let columnZero = 0;
-    const minValue = Array(columns + 1).fill(ASSIGNMENT_INFINITY) as number[];
-    const used = Array(columns + 1).fill(false) as boolean[];
-    do {
-      used[columnZero] = true;
-      const rowZero = p[columnZero]!;
-      let delta = ASSIGNMENT_INFINITY;
-      let nextColumn = 0;
-      for (let column = 1; column <= columns; column += 1) {
-        if (used[column]) continue;
-        const matrixValue = costMatrix[rowZero - 1]![column - 1]!;
-        const reduced = matrixValue - u[rowZero]! - v[column]!;
-        if (reduced < minValue[column]!) {
-          minValue[column] = reduced;
-          way[column] = columnZero;
-        }
-        if (minValue[column]! < delta ||
-            (minValue[column] === delta && column < nextColumn)) {
-          delta = minValue[column]!;
-          nextColumn = column;
-        }
-      }
-      if (!Number.isFinite(delta) || delta >= ASSIGNMENT_INFINITY / 2) {
-        return { assignment: Array(rows).fill(-1), cost: Number.POSITIVE_INFINITY, feasible: false };
-      }
-      for (let column = 0; column <= columns; column += 1) {
-        if (used[column]) {
-          const assignedRow = p[column] ?? 0;
-          u[assignedRow] = (u[assignedRow] ?? 0) + delta;
-          v[column] = (v[column] ?? 0) - delta;
-        } else {
-          minValue[column] = minValue[column]! - delta;
-        }
-      }
-      columnZero = nextColumn;
-    } while (p[columnZero] !== 0);
-
-    do {
-      const previousColumn = way[columnZero]!;
-      p[columnZero] = p[previousColumn]!;
-      columnZero = previousColumn;
-    } while (columnZero !== 0);
-  }
-
-  const assignment = Array(rows).fill(-1) as number[];
-  for (let column = 1; column <= columns; column += 1) {
-    const assignedRow = p[column] ?? 0;
-    if (assignedRow > 0) assignment[assignedRow - 1] = column - 1;
+  const solved = wasmHungarianSolve(costMatrix);
+  const assignment = solved.assignment;
+  if (!solved.feasible) {
+    return { assignment: Array(rows).fill(-1), cost: Number.POSITIVE_INFINITY, feasible: false };
   }
   let cost = 0;
   for (let row = 0; row < rows; row += 1) {
