@@ -1,0 +1,647 @@
+import { SlmError } from "./errors.js";
+import {
+  createComplexField,
+  fft2d,
+  sampleComplex,
+  scatterComplexAdjoint,
+  type ComplexField,
+} from "./fft.js";
+import type {
+  CalibrationPackage,
+  FrameMetrics,
+  HologramConfig,
+  NormalizedInput,
+  SlmFrameDescriptor,
+  TrapFrame,
+  TrapState,
+} from "./types.js";
+import { angularDistance, clamp, crc32, TAU, wrapPhase } from "./util.js";
+
+export interface HologramSolveResult {
+  pixels: Uint8Array | Uint16Array;
+  metrics: FrameMetrics;
+  descriptor?: SlmFrameDescriptor;
+}
+
+interface SolverState {
+  phase: Float64Array;
+  weights: Map<number, number>;
+  targetPhases: Map<number, number>;
+  measuredPhases: Map<number, number>;
+  measuredIntensities: Map<number, number>;
+  codes: Uint8Array | Uint16Array;
+  frameIndex: number;
+}
+
+export class SequentialWgsSolver {
+  readonly width: number;
+  readonly height: number;
+  private readonly calibration: CalibrationPackage;
+  private readonly config: Required<HologramConfig>;
+  private accepted: SolverState | undefined;
+  private candidate: SolverState | undefined;
+
+  constructor(calibration: CalibrationPackage, config: HologramConfig | Required<HologramConfig> = {}) {
+    this.calibration = calibration;
+    this.config = {
+      width: config.width ?? calibration.manifest.fftWidth ?? calibration.manifest.activeWidth,
+      height: config.height ?? calibration.manifest.fftHeight ?? calibration.manifest.activeHeight,
+      format: config.format ?? "UINT8",
+      targetPhaseMode: config.targetPhaseMode ?? "PHASE_LOCKED_WGS",
+      firstFrameIterations: config.firstFrameIterations ?? 12,
+      subsequentFrameIterations: config.subsequentFrameIterations ?? 4,
+      maxIterations: config.maxIterations ?? 64,
+      gamma: config.gamma ?? 0.7,
+      epsilon: config.epsilon ?? 1e-8,
+      minWeight: config.minWeight ?? 0.1,
+      maxWeight: config.maxWeight ?? 10,
+      convergenceTolerance: config.convergenceTolerance ?? 1e-4,
+      backgroundPolicy: config.backgroundPolicy ?? "PRESERVE",
+      oversampling: config.oversampling ?? 1,
+      qualityGates: config.qualityGates ?? {},
+      maxInsertedFrames: config.maxInsertedFrames ?? 32,
+      deterministicSeed: config.deterministicSeed ?? 1,
+      measureSolveTime: config.measureSolveTime ?? false,
+      requireConvergence: config.requireConvergence ?? false,
+    };
+    this.width = this.config.width;
+    this.height = this.config.height;
+    this.beginSequence();
+  }
+
+  beginSequence(): void {
+    this.accepted = undefined;
+    this.candidate = undefined;
+  }
+
+  solveSequentialFrame(frame: TrapFrame, iterationBudget?: number): HologramSolveResult {
+    if (frame.traps.some((trap) => !Number.isFinite(trap.xUm) || !Number.isFinite(trap.yUm) || !Number.isFinite(trap.intensity) || !Number.isFinite(trap.targetPhaseRad))) {
+      throw new SlmError("NUMERIC_ERROR", "Trap frame contains a non-finite value", { stage: "SOLVING_SLM_FRAMES" });
+    }
+    const started = this.config.measureSolveTime ? nowMs() : 0;
+    const pixels = this.width * this.height;
+    const mappedTargets = frame.traps.map((trap) => this.mapCoordinate(trap));
+    for (const target of mappedTargets) {
+      if (!Number.isFinite(target.x) || !Number.isFinite(target.y) || target.x < -0.5 || target.x > this.width - 0.5 || target.y < -0.5 || target.y > this.height - 0.5) {
+        throw new SlmError("OUT_OF_BOUNDS", "A calibrated trap coordinate lies outside the FFT grid", {
+          stage: "SOLVING_SLM_FRAMES",
+          details: { target, width: this.width, height: this.height },
+        });
+      }
+    }
+    const previous = this.accepted;
+    const targetPhases = new Map<number, number>();
+    const weights = new Map<number, number>();
+    for (const trap of frame.traps) {
+      targetPhases.set(
+        trap.trapId,
+        this.config.targetPhaseMode === "PHASE_INTERPOLATED_WGS"
+          ? trap.targetPhaseRad
+          : previous?.targetPhases.get(trap.trapId) ?? trap.targetPhaseRad,
+      );
+      weights.set(trap.trapId, previous?.weights.get(trap.trapId) ?? 1);
+    }
+    let phase = previous ? new Float64Array(previous.phase) : this.initializeSuperposition(frame);
+    const iterations = Math.min(
+      Math.max(1, iterationBudget ?? (previous ? this.config.subsequentFrameIterations : this.config.firstFrameIterations)),
+      this.config.maxIterations,
+    );
+    let measured = frame.traps.map(() => ({ real: 0, imag: 0 }));
+    let amplitudes = frame.traps.map(() => 0);
+    let converged = frame.traps.length === 0;
+    let maxRelativeError = Number.POSITIVE_INFINITY;
+    let performedIterations = 0;
+    for (let iteration = 0; iteration < iterations; iteration += 1) {
+      performedIterations += 1;
+      const forward = this.forwardField(phase);
+      measured = mappedTargets.map((target) => sampleComplex(forward, target.x, target.y, true));
+      amplitudes = measured.map((value) => Math.hypot(value.real, value.imag));
+      const desired = frame.traps.map((trap) => Math.sqrt(Math.max(0, trap.intensity)));
+      let numerator = 0;
+      let denominator = 0;
+      for (let index = 0; index < desired.length; index += 1) {
+        numerator += desired[index]! * amplitudes[index]!;
+        denominator += desired[index]! * desired[index]!;
+      }
+      const scale = denominator > this.config.epsilon ? numerator / denominator : 1;
+      for (let index = 0; index < frame.traps.length; index += 1) {
+        const trap = frame.traps[index]!;
+        if (desired[index]! <= this.config.epsilon) continue;
+        const oldWeight = weights.get(trap.trapId) ?? 1;
+        const ratio = scale * desired[index]! / (amplitudes[index]! + this.config.epsilon);
+        weights.set(trap.trapId, clamp(oldWeight * ratio ** this.config.gamma, this.config.minWeight, this.config.maxWeight));
+      }
+      normalizeWeights(weights);
+      const constrained = this.config.backgroundPolicy === "PRESERVE"
+        ? cloneField(forward)
+        : createComplexField(this.width, this.height);
+      // Replace the target support rather than adding a second field on top of
+      // the measured value. This is the Fourier-plane amplitude constraint.
+      for (const target of mappedTargets) clearComplexSupport(constrained, target.x, target.y);
+      for (let index = 0; index < frame.traps.length; index += 1) {
+        const trap = frame.traps[index]!;
+        const target = mappedTargets[index]!;
+        const targetPhase = chooseTargetPhase(this.config.targetPhaseMode, targetPhases.get(trap.trapId) ?? trap.targetPhaseRad, measured[index]!);
+        const targetAmplitude = (weights.get(trap.trapId) ?? 1) * desired[index]!;
+        scatterComplexAdjoint(constrained, target.x, target.y, targetAmplitude * Math.cos(targetPhase), targetAmplitude * Math.sin(targetPhase), true);
+      }
+      fft2d(constrained, true);
+      for (let index = 0; index < phase.length; index += 1) {
+        const magnitude = Math.hypot(constrained.real[index]!, constrained.imag[index]!);
+        if (magnitude > this.config.epsilon) phase[index] = Math.atan2(constrained.imag[index]!, constrained.real[index]!);
+      }
+      maxRelativeError = maximumRelativeAmplitudeError(amplitudes, desired, scale, this.config.epsilon);
+      const phaseError = maximumTargetPhaseError(frame.traps, measured, targetPhases, this.config.targetPhaseMode);
+      converged = maxRelativeError <= this.config.convergenceTolerance && phaseError <= phaseConvergenceTolerance(this.config);
+      if (converged) break;
+    }
+
+    const displayPhase = this.composeDisplayPhase(phase);
+    const codes = this.quantize(displayPhase);
+    const optimizedForward = this.forwardField(phase);
+    const optimizedMeasured = frame.traps.map((trap) => {
+      const mapped = this.mapCoordinate(trap);
+      return sampleComplex(optimizedForward, mapped.x, mapped.y, true);
+    });
+    const optimizedAmplitudes = optimizedMeasured.map((value) => Math.hypot(value.real, value.imag));
+    const optimizedDesired = frame.traps.map((trap) => Math.sqrt(Math.max(0, trap.intensity)));
+    maxRelativeError = maximumRelativeAmplitudeError(
+      optimizedAmplitudes,
+      optimizedDesired,
+      fitAmplitudeScale(optimizedAmplitudes, optimizedDesired, this.config.epsilon),
+      this.config.epsilon,
+    );
+    converged = maxRelativeError <= this.config.convergenceTolerance &&
+      maximumTargetPhaseError(frame.traps, optimizedMeasured, targetPhases, this.config.targetPhaseMode) <= phaseConvergenceTolerance(this.config);
+    const finalForward = this.forwardField(this.decodeCodes(codes, displayPhase));
+    const finalMeasured = frame.traps.map((trap) => {
+      const mapped = this.mapCoordinate(trap);
+      return sampleComplex(finalForward, mapped.x, mapped.y, true);
+    });
+    const finalAmplitudes = finalMeasured.map((value) => Math.hypot(value.real, value.imag));
+    const measuredPhases = new Map<number, number>();
+    const measuredIntensities = new Map<number, number>();
+    frame.traps.forEach((trap, index) => {
+      measuredPhases.set(trap.trapId, Math.atan2(finalMeasured[index]!.imag, finalMeasured[index]!.real));
+      measuredIntensities.set(trap.trapId, finalAmplitudes[index]! ** 2);
+    });
+    const finalDesired = frame.traps.map((trap) => Math.sqrt(Math.max(0, trap.intensity)));
+    const finalScale = fitAmplitudeScale(finalAmplitudes, finalDesired, this.config.epsilon);
+    maxRelativeError = maximumRelativeAmplitudeError(finalAmplitudes, finalDesired, finalScale, this.config.epsilon);
+    converged = maxRelativeError <= this.config.convergenceTolerance &&
+      maximumTargetPhaseError(frame.traps, finalMeasured, targetPhases, this.config.targetPhaseMode) <= phaseConvergenceTolerance(this.config);
+    const metrics = this.evaluateMetrics(
+      frame,
+      finalForward,
+      finalMeasured,
+      finalAmplitudes,
+      codes,
+      previous,
+      performedIterations,
+      converged,
+      maxRelativeError,
+      started,
+      targetPhases,
+      measuredPhases,
+      measuredIntensities,
+      weights,
+    );
+    this.candidate = {
+      phase,
+      weights: new Map(weights),
+      targetPhases: new Map(targetPhases),
+      measuredPhases,
+      measuredIntensities,
+      codes,
+      frameIndex: frame.frameIndex,
+    };
+    metrics.accepted = passesQualityGates(metrics, this.config.qualityGates) &&
+      (!this.config.requireConvergence || metrics.converged);
+    return { pixels: new (codes.constructor as { new (source: Uint8Array | Uint16Array): Uint8Array | Uint16Array })(codes), metrics };
+  }
+
+  commitFrameState(): void {
+    if (!this.candidate) throw new SlmError("INVALID_ARGUMENT", "No hologram candidate is available to commit", { stage: "SOLVING_SLM_FRAMES" });
+    this.accepted = {
+      phase: new Float64Array(this.candidate.phase),
+      weights: new Map(this.candidate.weights),
+      targetPhases: new Map(this.candidate.targetPhases),
+      measuredPhases: new Map(this.candidate.measuredPhases),
+      measuredIntensities: new Map(this.candidate.measuredIntensities),
+      codes: new (this.candidate.codes.constructor as { new (source: Uint8Array | Uint16Array): Uint8Array | Uint16Array })(this.candidate.codes),
+      frameIndex: this.candidate.frameIndex,
+    };
+    this.candidate = undefined;
+  }
+
+  rollbackToPreviousAcceptedFrame(): void {
+    this.candidate = undefined;
+  }
+
+  get acceptedFrameIndex(): number | undefined {
+    return this.accepted?.frameIndex;
+  }
+
+  private initializeSuperposition(frame: TrapFrame): Float64Array {
+    const phase = new Float64Array(this.width * this.height);
+    if (frame.traps.length === 0) return phase;
+    for (let y = 0; y < this.height; y += 1) {
+      for (let x = 0; x < this.width; x += 1) {
+        let real = 0;
+        let imag = 0;
+        for (const trap of frame.traps) {
+          const mapped = this.mapCoordinate(trap);
+          const amplitude = Math.sqrt(Math.max(0, trap.intensity));
+          const angle = TAU * (mapped.x * x / this.width + mapped.y * y / this.height) + trap.targetPhaseRad;
+          real += amplitude * Math.cos(angle);
+          imag += amplitude * Math.sin(angle);
+        }
+        phase[y * this.width + x] = Math.atan2(imag, real);
+      }
+    }
+    return phase;
+  }
+
+  private forwardField(phase: Float64Array): ComplexField {
+    const field = createComplexField(this.width, this.height);
+    const activePixels = this.calibration.manifest.activeWidth * this.calibration.manifest.activeHeight;
+    for (let index = 0; index < phase.length; index += 1) {
+      const x = index % this.width;
+      const y = Math.floor(index / this.width);
+      const amplitude = this.calibrationValueAt(this.calibration.incidentAmplitude, index, x, y, 1, activePixels) *
+        this.calibrationValueAt(this.calibration.apertureMask, index, x, y, 1, activePixels);
+      field.real[index] = amplitude * Math.cos(phase[index]!);
+      field.imag[index] = amplitude * Math.sin(phase[index]!);
+    }
+    fft2d(field, false);
+    return field;
+  }
+
+  private calibrationValueAt(
+    value: ArrayLike<number> | number | undefined,
+    index: number,
+    x: number,
+    y: number,
+    fallback: number,
+    activePixels: number,
+  ): number {
+    if (value === undefined || typeof value === "number") return typeof value === "number" ? value : fallback;
+    if (value.length === this.width * this.height) return value[index] ?? fallback;
+    if (value.length === activePixels) {
+      const xStart = Math.floor((this.width - this.calibration.manifest.activeWidth) / 2);
+      const yStart = Math.floor((this.height - this.calibration.manifest.activeHeight) / 2);
+      if (x < xStart || y < yStart || x >= xStart + this.calibration.manifest.activeWidth || y >= yStart + this.calibration.manifest.activeHeight) {
+        return 0;
+      }
+      const activeIndex = (y - yStart) * this.calibration.manifest.activeWidth + (x - xStart);
+      return value[activeIndex] ?? fallback;
+    }
+    return fallback;
+  }
+
+  private mapCoordinate(trap: TrapState): { x: number; y: number } {
+    const transform = this.calibration.coordinateTransform;
+    if (transform?.physicalToFft) {
+      const mapped = transform.physicalToFft({ xUm: trap.xUm, yUm: trap.yUm });
+      return "x" in mapped ? mapped : { x: mapped.xUm, y: mapped.yUm };
+    }
+    if (transform && [transform.a, transform.b, transform.c, transform.d].every((value) => value !== undefined)) {
+      return {
+        x: transform.a! * trap.xUm + transform.b! * trap.yUm + (transform.offsetX ?? 0),
+        y: transform.c! * trap.xUm + transform.d! * trap.yUm + (transform.offsetY ?? 0),
+      };
+    }
+    const originX = transform?.originXUm ?? this.width / 2;
+    const originY = transform?.originYUm ?? this.height / 2;
+    const scaleX = transform?.scaleX ?? 1;
+    const scaleY = transform?.scaleY ?? 1;
+    const rotation = transform?.rotationRad ?? 0;
+    const x = trap.xUm * scaleX;
+    const y = trap.yUm * scaleY;
+    return {
+      x: originX + Math.cos(rotation) * x - Math.sin(rotation) * y,
+      y: originY - Math.sin(rotation) * x - Math.cos(rotation) * y,
+    };
+  }
+
+  private composeDisplayPhase(phase: Float64Array): Float64Array {
+    const display = new Float64Array(phase.length);
+    const signs = this.calibration.phaseSigns;
+    for (let index = 0; index < phase.length; index += 1) {
+      display[index] = wrapPhase(
+        phase[index]! +
+        (signs?.aberration ?? 1) * calibrationValue(this.calibration.aberrationPhase, index, 0) +
+        (signs?.grating ?? 1) * calibrationValue(this.calibration.carrierGrating, index, 0) +
+        (signs?.lens ?? 1) * calibrationValue(this.calibration.digitalLens, index, 0),
+      );
+    }
+    return display;
+  }
+
+  private quantize(phase: Float64Array): Uint8Array | Uint16Array {
+    const maxCode = this.config.format === "UINT8" ? 255 : 65535;
+    const result = this.config.format === "UINT8" ? new Uint8Array(phase.length) : new Uint16Array(phase.length);
+    for (let index = 0; index < phase.length; index += 1) {
+      const target = wrapPhase(phase[index]!);
+      let code = inverseLut(target, this.calibration, maxCode);
+      code = Math.round(clamp(code, 0, maxCode));
+      result[index] = code;
+    }
+    return result;
+  }
+
+  private decodeCodes(codes: Uint8Array | Uint16Array, fallback: Float64Array): Float64Array {
+    const decoded = new Float64Array(codes.length);
+    const maxCode = this.config.format === "UINT8" ? 255 : 65535;
+    const lut = this.calibration.phaseResponseLut;
+    for (let index = 0; index < codes.length; index += 1) {
+      if (!lut || lut.length < 2) {
+        const inverse = this.calibration.inversePhaseLut;
+        if (inverse && inverse.length > 1) {
+          let nearest = 0;
+          let nearestError = Number.POSITIVE_INFINITY;
+          for (let lutIndex = 0; lutIndex < inverse.length; lutIndex += 1) {
+            const error = Math.abs(inverse[lutIndex]! - codes[index]!);
+            if (error < nearestError) {
+              nearestError = error;
+              nearest = lutIndex;
+            }
+          }
+          decoded[index] = wrapPhase((nearest / (inverse.length - 1)) * TAU - Math.PI);
+        } else {
+          decoded[index] = wrapPhase((codes[index]! / maxCode) * TAU - Math.PI);
+        }
+        continue;
+      }
+      const position = (codes[index]! / maxCode) * (lut.length - 1);
+      const low = Math.floor(position);
+      const high = Math.min(lut.length - 1, low + 1);
+      const fraction = position - low;
+      decoded[index] = wrapPhase((lut[low] ?? fallback[index]!) * (1 - fraction) + (lut[high] ?? fallback[index]!) * fraction);
+    }
+    return decoded;
+  }
+
+  private evaluateMetrics(
+    frame: TrapFrame,
+    field: ComplexField,
+    measured: { real: number; imag: number }[],
+    amplitudes: number[],
+    codes: Uint8Array | Uint16Array,
+    previous: SolverState | undefined,
+    iterations: number,
+    converged: boolean,
+    relativeError: number,
+    started: number,
+    targetPhases: Map<number, number>,
+    measuredPhases: Map<number, number>,
+    measuredIntensities: Map<number, number>,
+    weights: Map<number, number>,
+  ): FrameMetrics {
+    const intensities = amplitudes.map((amplitude) => amplitude * amplitude);
+    const mean = meanOf(intensities);
+    const std = standardDeviation(intensities, mean);
+    const totalPower = field.real.reduce((sum, value, index) => sum + value * value + field.imag[index]! * field.imag[index]!, 0);
+    const targetPower = intensities.reduce((sum, value) => sum + value, 0);
+    const ghost = maximumGhostIntensity(field, frame.traps.map((trap) => this.mapCoordinate(trap)));
+    const phaseError = maximumTargetPhaseError(frame.traps, measured, targetPhases, this.config.targetPhaseMode);
+    const phaseChange = previous ? maximumMapPhaseChange(previous.measuredPhases, measuredPhases) : 0;
+    const codeChange = previous ? maximumCodeChange(previous.codes, codes) : 0;
+    const flags: string[] = [];
+    if (!converged) flags.push("NOT_CONVERGED");
+    if (frame.traps.some((trap) => trap.intensity > this.config.epsilon) && (mean <= this.config.epsilon || targetPower <= this.config.epsilon)) flags.push("ZERO_TARGET_OUTPUT");
+    if (!Number.isFinite(relativeError) || !Number.isFinite(totalPower) ||
+        ![mean, std, phaseError, phaseChange, codeChange, ...weights.values()].every(Number.isFinite)) flags.push("NUMERIC_ERROR");
+    const transitionMinimum = estimateTransitionMinimumIntensity(measuredIntensities, frame, previous, codes, this.config.format);
+    return {
+      frameIndex: frame.frameIndex,
+      timeUs: frame.timeUs,
+      iterations,
+      converged,
+      targetIntensityMean: mean,
+      targetIntensityStd: std,
+      targetIntensityCoefficientOfVariation: mean > 0 ? std / mean : 0,
+      minimumToMeanIntensityRatio: mean > 0 && intensities.length > 0 ? Math.min(...intensities) / mean : 1,
+      diffractionEfficiency: totalPower > 0 ? targetPower / totalPower : 0,
+      maximumGhostIntensity: ghost,
+      maximumWgsWeight: Math.max(0, ...weights.values()),
+      maximumTargetPhaseErrorRad: phaseError,
+      targetPhaseChangeRad: phaseChange,
+      displayCodeChange: codeChange,
+      estimatedTransitionMinimumIntensity: transitionMinimum,
+      solveTimeMs: this.config.measureSolveTime ? nowMs() - started : 0,
+      refinementCount: 0,
+      numericalValid: !flags.includes("NUMERIC_ERROR"),
+      accepted: false,
+      flags,
+    };
+  }
+}
+
+export const WgsSolver = SequentialWgsSolver;
+
+export function solveHologramFrame(
+  frame: TrapFrame,
+  calibration: CalibrationPackage,
+  config: HologramConfig | Required<HologramConfig> = {},
+): HologramSolveResult {
+  const solver = new SequentialWgsSolver(calibration, config);
+  const result = solver.solveSequentialFrame(frame);
+  if (result.metrics.accepted) solver.commitFrameState();
+  return result;
+}
+
+function chooseTargetPhase(
+  mode: HologramConfig["targetPhaseMode"],
+  persistent: number,
+  measured: { real: number; imag: number },
+): number {
+  const measuredPhase = Math.atan2(measured.imag, measured.real);
+  if (mode === "REFERENCE_WGS") return measuredPhase;
+  if (mode === "SOFT_PHASE_LOCKED_WGS") return wrapPhase(persistent + 0.2 * wrapPhase(measuredPhase - persistent));
+  return persistent;
+}
+
+function maximumTargetPhaseError(
+  traps: TrapState[],
+  measured: { real: number; imag: number }[],
+  targetPhases: Map<number, number>,
+  mode: HologramConfig["targetPhaseMode"],
+): number {
+  if (traps.length === 0 || mode === "REFERENCE_WGS") return 0;
+  return Math.max(...traps.map((trap, index) => angularDistance(Math.atan2(measured[index]!.imag, measured[index]!.real), targetPhases.get(trap.trapId) ?? trap.targetPhaseRad)));
+}
+
+function maximumRelativeAmplitudeError(amplitudes: number[], desired: number[], scale: number, epsilon: number): number {
+  if (desired.length === 0) return 0;
+  return Math.max(...desired.map((value, index) => Math.abs(amplitudes[index]! - scale * value) / (Math.abs(scale * value) + epsilon)));
+}
+
+function phaseConvergenceTolerance(config: Required<HologramConfig>): number {
+  const codeCount = config.format === "UINT8" ? 256 : 65536;
+  return Math.max(config.convergenceTolerance, 1e-3, TAU / codeCount * 1.5);
+}
+
+function fitAmplitudeScale(amplitudes: number[], desired: number[], epsilon: number): number {
+  let numerator = 0;
+  let denominator = 0;
+  for (let index = 0; index < desired.length; index += 1) {
+    numerator += desired[index]! * amplitudes[index]!;
+    denominator += desired[index]! * desired[index]!;
+  }
+  return denominator > epsilon ? numerator / denominator : 1;
+}
+
+function normalizeWeights(weights: Map<number, number>): void {
+  if (weights.size === 0) return;
+  const mean = [...weights.values()].reduce((sum, value) => sum + value, 0) / weights.size;
+  if (mean <= 0 || !Number.isFinite(mean)) return;
+  for (const [id, value] of weights) weights.set(id, value / mean);
+}
+
+function passesQualityGates(metrics: FrameMetrics, gates: HologramConfig["qualityGates"]): boolean {
+  if (!metrics.numericalValid) return false;
+  if (metrics.flags.includes("ZERO_TARGET_OUTPUT")) return false;
+  if (gates?.maxIntensityCoefficientOfVariation !== undefined && metrics.targetIntensityCoefficientOfVariation > gates.maxIntensityCoefficientOfVariation) return false;
+  if (gates?.minIntensityToMeanRatio !== undefined && metrics.minimumToMeanIntensityRatio < gates.minIntensityToMeanRatio) return false;
+  if (gates?.minDiffractionEfficiency !== undefined && metrics.diffractionEfficiency < gates.minDiffractionEfficiency) return false;
+  if (gates?.maxGhostIntensity !== undefined && metrics.maximumGhostIntensity > gates.maxGhostIntensity) return false;
+  if (gates?.maxTargetPhaseErrorRad !== undefined && metrics.maximumTargetPhaseErrorRad > gates.maxTargetPhaseErrorRad) return false;
+  if (gates?.maxPhaseChangeRad !== undefined && metrics.targetPhaseChangeRad > gates.maxPhaseChangeRad) return false;
+  if (gates?.maxDisplayCodeChange !== undefined && metrics.displayCodeChange > gates.maxDisplayCodeChange) return false;
+  return true;
+}
+
+function calibrationValue(value: ArrayLike<number> | number | undefined, index: number, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (typeof value === "number") return value;
+  return value[index] ?? fallback;
+}
+
+function clearComplexSupport(field: ComplexField, x: number, y: number): void {
+  const x0 = Math.floor(x);
+  const y0 = Math.floor(y);
+  for (const ix of [x0, x0 + 1]) {
+    for (const iy of [y0, y0 + 1]) {
+      const clampedX = Math.max(0, Math.min(field.width - 1, ix));
+      const clampedY = Math.max(0, Math.min(field.height - 1, iy));
+      const index = clampedY * field.width + clampedX;
+      field.real[index] = 0;
+      field.imag[index] = 0;
+    }
+  }
+}
+
+function inverseLut(phase: number, calibration: CalibrationPackage, maxCode: number): number {
+  if (calibration.inversePhaseLut && calibration.inversePhaseLut.length > 1) {
+    const position = ((phase + Math.PI) / TAU) * (calibration.inversePhaseLut.length - 1);
+    const low = Math.floor(position);
+    const high = Math.min(calibration.inversePhaseLut.length - 1, low + 1);
+    const fraction = position - low;
+    return (calibration.inversePhaseLut[low] ?? 0) * (1 - fraction) + (calibration.inversePhaseLut[high] ?? 0) * fraction;
+  }
+  if (calibration.phaseResponseLut && calibration.phaseResponseLut.length > 1) {
+    const lut = calibration.phaseResponseLut;
+    const phaseRange = calibration.manifest.phaseConvention === "ZERO_TO_TWO_PI" ||
+      (calibration.manifest.phaseConvention === undefined && lut[0]! >= -1e-9 && lut[lut.length - 1]! > Math.PI)
+      ? (phase < 0 ? phase + TAU : phase)
+      : phase;
+    const increasing = lut[0]! <= lut[lut.length - 1]!;
+    let low = 0;
+    let high = lut.length - 1;
+    while (high - low > 1) {
+      const middle = (low + high) >>> 1;
+      const before = lut[middle]!;
+      if (increasing ? before < phaseRange : before > phaseRange) low = middle;
+      else high = middle;
+    }
+    const bestCode = Math.abs(lut[low]! - phaseRange) <= Math.abs(lut[high]! - phaseRange) ? low : high;
+    return bestCode / Math.max(1, lut.length - 1) * maxCode;
+  }
+  return ((phase + Math.PI) / TAU) * maxCode;
+}
+
+function cloneField(field: ComplexField): ComplexField {
+  return { real: new Float64Array(field.real), imag: new Float64Array(field.imag), width: field.width, height: field.height };
+}
+
+function maximumGhostIntensity(field: ComplexField, targets: { x: number; y: number }[]): number {
+  if (targets.length === 0) return 0;
+  let maximum = 0;
+  for (let y = 0; y < field.height; y += 1) {
+    for (let x = 0; x < field.width; x += 1) {
+      if (targets.some((target) => Math.hypot(target.x - x, target.y - y) <= 1.5)) continue;
+      const index = y * field.width + x;
+      maximum = Math.max(maximum, field.real[index]! ** 2 + field.imag[index]! ** 2);
+    }
+  }
+  return maximum;
+}
+
+function maximumMapPhaseChange(previous: Map<number, number>, current: Map<number, number>): number {
+  let maximum = 0;
+  for (const [id, phase] of current) {
+    const old = previous.get(id);
+    if (old !== undefined) maximum = Math.max(maximum, angularDistance(old, phase));
+  }
+  return maximum;
+}
+
+function estimateTransitionMinimumIntensity(
+  current: Map<number, number>,
+  frame: TrapFrame,
+  previous: SolverState | undefined,
+  codes: Uint8Array | Uint16Array,
+  format: "UINT8" | "UINT16",
+): number {
+  const values = frame.traps.map((trap) => current.get(trap.trapId) ?? 0);
+  const currentMean = meanOf(values);
+  const currentMinimum = currentMean > 0 && values.length > 0 ? Math.min(...values) / currentMean : values.length === 0 ? 1 : 0;
+  if (!previous) return clamp(currentMinimum, 0, 1);
+  const previousValues = [...previous.measuredIntensities.values()];
+  const previousMean = meanOf(previousValues);
+  const previousMinimum = previousMean > 0 && previousValues.length > 0 ? Math.min(...previousValues) / previousMean : 1;
+  const maxCode = format === "UINT8" ? 255 : 65535;
+  const codeFactor = 1 - clamp(maximumCodeChange(previous.codes, codes) / Math.max(1, maxCode), 0, 1);
+  return clamp(Math.min(currentMinimum, previousMinimum, currentMinimum * codeFactor), 0, 1);
+}
+
+function maximumCodeChange(previous: Uint8Array | Uint16Array, current: Uint8Array | Uint16Array): number {
+  let maximum = 0;
+  const length = Math.min(previous.length, current.length);
+  for (let index = 0; index < length; index += 1) maximum = Math.max(maximum, Math.abs(previous[index]! - current[index]!));
+  return maximum;
+}
+
+function meanOf(values: number[]): number {
+  return values.length === 0 ? 0 : values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function standardDeviation(values: number[], mean: number): number {
+  return values.length === 0 ? 0 : Math.sqrt(values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length);
+}
+
+function nowMs(): number {
+  return typeof performance !== "undefined" ? performance.now() : Date.now();
+}
+
+export function frameDescriptor(
+  frame: TrapFrame,
+  pixels: Uint8Array | Uint16Array,
+  width: number,
+  height: number,
+  format: "UINT8" | "UINT16",
+  byteOffset: bigint,
+): SlmFrameDescriptor {
+  const bytes = new Uint8Array(pixels.buffer, pixels.byteOffset, pixels.byteLength);
+  return {
+    frameIndex: frame.frameIndex,
+    timeUs: frame.timeUs,
+    width,
+    height,
+    format,
+    byteOffset,
+    byteLength: pixels.byteLength,
+    crc32: crc32(bytes),
+  };
+}

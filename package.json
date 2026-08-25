@@ -1,0 +1,30 @@
+{
+  "name": "slm-sequence-compiler",
+  "version": "0.1.0",
+  "description": "Deterministic atom rearrangement and phase-only SLM sequence compiler",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build:web": "esbuild src/index.ts --bundle --format=esm --platform=browser --outfile=web/compiler.js",
+    "dev": "npx wrangler dev --config wrangler.jsonc",
+    "deploy": "npm run build:web && npx wrangler deploy --config wrangler.jsonc"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
