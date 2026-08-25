@@ -42,6 +42,13 @@ moving, inspecting, and removing initial atoms and target sites. Every visual
 change is reflected in the JSON inputs, which remain available for direct edits
 and imports.
 
+Target sites can also be extracted from an uploaded target-field image. The
+in-browser importer detects bright or dark connected spots in a dedicated Web
+Worker, previews their weighted centroids, and maps them into a centered
+micrometer field using adjustable physical width and height. Threshold, minimum
+blob area, polarity, and point limit remain adjustable before the detected sites
+replace the target JSON.
+
 The `/tweezers` workspace generates a single SLM frame directly from optical
 tweezer coordinates, requested phases, and relative intensities. Inputs can be
 edited in the table or as JSON, and the resulting 8-bit frame can be downloaded

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import type { InitialAtom, TargetSite } from "../../../src/types.js";
+import TargetImageImporter from "./TargetImageImporter.vue";
 import {
   cloneAtoms,
   cloneTargets,
@@ -25,6 +26,10 @@ interface CoordinateEntry extends Selection {
   point: CoordinatePoint;
 }
 
+interface TargetImageImporterHandle {
+  reset(): void;
+}
+
 const props = defineProps<{
   initialAtoms: readonly InitialAtom[];
   targetSites: readonly TargetSite[];
@@ -41,6 +46,7 @@ const canvas = ref<HTMLCanvasElement | null>(null);
 const initialUpload = ref<HTMLInputElement | null>(null);
 const targetUpload = ref<HTMLInputElement | null>(null);
 const requestUpload = ref<HTMLInputElement | null>(null);
+const targetImageImporter = ref<TargetImageImporterHandle | null>(null);
 const atoms = ref<InitialAtom[]>(cloneAtoms(props.initialAtoms));
 const targets = ref<TargetSite[]>(cloneTargets(props.targetSites));
 const initialDraft = ref(serializePoints(atoms.value));
@@ -545,6 +551,26 @@ function handleUpload(event: Event, target: "initial" | "target" | "request"): v
   input.value = "";
 }
 
+function applyImageTargets(
+  points: readonly { xUm: number; yUm: number }[],
+  complete: (accepted: boolean) => void,
+): void {
+  if (props.disabled || points.length === 0 || !synchronizeBeforeVisualEdit()) {
+    complete(false);
+    return;
+  }
+  targets.value = points.map((point, index) => ({
+    siteId: index + 1,
+    xUm: point.xUm,
+    yUm: point.yUm,
+  }));
+  selected.value = null;
+  hover.value = null;
+  commitVisualCoordinates();
+  nextTick(fitCoordinateView);
+  complete(true);
+}
+
 function resizeCanvas(fit = false): void {
   if (!canvas.value || !context) return;
   const ratio = Math.min(window.devicePixelRatio || 1, 2);
@@ -563,6 +589,7 @@ function resetEditor(): void {
   hover.value = null;
   tool.value = "select";
   syncDrafts();
+  targetImageImporter.value?.reset();
   emit("error", "");
   nextTick(() => resizeCanvas(true));
 }
@@ -669,6 +696,11 @@ defineExpose({ applyDraft, fitCoordinateView, resetEditor });
         </aside>
       </div>
     </div>
+    <div class="data-subbar target-image-subbar">
+      <span>IMAGE INPUT / TARGET FIELD</span>
+      <span>SPOT CENTROIDS → TARGET SITES</span>
+    </div>
+    <TargetImageImporter ref="targetImageImporter" :disabled="disabled" @apply="applyImageTargets" />
     <div class="data-subbar">
       <span>JSON INPUT / ADVANCED</span>
       <span class="json-status" :class="{ 'is-dirty': jsonStatus === 'dirty', 'is-invalid': jsonStatus === 'invalid' }">{{ statusLabel }}</span>
