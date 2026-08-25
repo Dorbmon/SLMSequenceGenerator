@@ -55,6 +55,47 @@ describe("target-field image detection", () => {
     expect(result.points[0]).toMatchObject({ xPx: 3.5, yPx: 3.5, areaPx: 4 });
   });
 
+  it("samples connected image strokes as a point pattern", () => {
+    const image = rgbaImage(18, 10, 0);
+    fill(image, 18, 2, 1, 2, 8, 150);
+    fill(image, 18, 8, 1, 2, 8, 210);
+    fill(image, 18, 14, 1, 2, 8, 255);
+    setPixel(image, 18, 17, 9, 255);
+
+    const result = detectImagePoints(image, 18, 10, {
+      ...defaults,
+      mode: "PATTERN",
+      threshold: 0.2,
+      minimumAreaPx: 2,
+      patternSpacingPx: 2,
+    });
+
+    expect(result.mode).toBe("PATTERN");
+    expect(result.points.length).toBeGreaterThan(3);
+    expect(result.points.some((point) => point.xPx < 5)).toBe(true);
+    expect(result.points.some((point) => point.xPx > 12)).toBe(true);
+    expect(result.sourcePixelCount).toBe(48);
+    expect(result.effectiveSpacingPx).toBe(2);
+    expect(result.discardedSmallComponents).toBe(1);
+  });
+
+  it("raises pattern spacing to preserve the whole shape within the point limit", () => {
+    const image = rgbaImage(20, 20, 255);
+    const result = detectImagePoints(image, 20, 20, {
+      ...defaults,
+      mode: "PATTERN",
+      threshold: 0.5,
+      minimumAreaPx: 1,
+      maximumPoints: 9,
+      patternSpacingPx: 1,
+    });
+
+    expect(result.points.length).toBeLessThanOrEqual(9);
+    expect(result.effectiveSpacingPx).toBeGreaterThan(1);
+    expect(Math.min(...result.points.map((point) => point.xPx))).toBeLessThan(4);
+    expect(Math.max(...result.points.map((point) => point.xPx))).toBeGreaterThan(15);
+  });
+
   it("maps pixel centers into a centered micrometer field with +y up", () => {
     const points = mapImagePointsToField([
       { xPx: 0, yPx: 0, areaPx: 2, peakSignal: 255, integratedSignal: 10 },

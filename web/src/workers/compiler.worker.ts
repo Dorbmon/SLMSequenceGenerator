@@ -181,6 +181,10 @@ function calibration(
   maximumY: number,
   calibrationId: string,
 ): CalibrationPackage {
+  const uniformScale = Math.min(
+    fftWidth * 0.4 / maximumX,
+    fftHeight * 0.4 / maximumY,
+  );
   return {
     manifest: {
       calibrationId,
@@ -194,8 +198,8 @@ function calibration(
     coordinateTransform: {
       originXUm: fftWidth / 2,
       originYUm: fftHeight / 2,
-      scaleX: fftWidth * 0.4 / maximumX,
-      scaleY: fftHeight * 0.4 / maximumY,
+      scaleX: uniformScale,
+      scaleY: uniformScale,
     },
   };
 }

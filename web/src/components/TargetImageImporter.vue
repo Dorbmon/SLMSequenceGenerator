@@ -4,6 +4,7 @@ import ComputationActivity from "./ComputationActivity.vue";
 import {
   mapImagePointsToField,
   type DetectedImagePoint,
+  type ImageExtractionMode,
   type SpotDetectionOptions,
   type SpotPolarity,
 } from "../lib/image-points.js";
@@ -42,9 +43,11 @@ const analysisWidth = ref(0);
 const analysisHeight = ref(0);
 const fieldWidthUm = ref(20);
 const fieldHeightUm = ref(20);
-const thresholdPercent = ref(62);
+const extractionMode = ref<ImageExtractionMode>(props.destination === "tweezers" ? "PATTERN" : "CENTROIDS");
+const thresholdPercent = ref(props.destination === "tweezers" ? 20 : 62);
 const minimumAreaPx = ref(3);
 const maximumPoints = ref(256);
+const patternSpacingPx = ref(2);
 const polarity = ref<SpotPolarity>("BRIGHT");
 const detections = ref<DetectedImagePoint[]>([]);
 const running = ref(false);
@@ -55,6 +58,8 @@ const thresholdSignal = ref(0);
 const discardedSmall = ref(0);
 const discardedLarge = ref(0);
 const discardedByLimit = ref(0);
+const sourcePixelCount = ref(0);
+const effectiveSpacingPx = ref(0);
 const appliedCount = ref<number | null>(null);
 let sourceCanvas: HTMLCanvasElement | null = null;
 let detector: Worker | null = null;
@@ -79,12 +84,19 @@ const pointSummary = computed(() => {
   return `${detections.value.length} POINT${detections.value.length === 1 ? "" : "S"}`;
 });
 const discardedSummary = computed(() => {
+  if (extractionMode.value === "PATTERN") {
+    const noise = discardedSmall.value > 0
+      ? ` · ${discardedSmall.value} noise component${discardedSmall.value === 1 ? "" : "s"} removed`
+      : "";
+    const consolidated = discardedByLimit.value > 0 ? " · density reduced to point limit" : "";
+    return `${sourcePixelCount.value} foreground px · ${effectiveSpacingPx.value}px sampling${noise}${consolidated}`;
+  }
   const discarded = discardedSmall.value + discardedLarge.value + discardedByLimit.value;
   return discarded > 0 ? `${discarded} component${discarded === 1 ? "" : "s"} filtered` : "No extra components filtered";
 });
 const destinationCopy = computed(() => props.destination === "tweezers" ? {
   title: "Extract optical tweezers from an image",
-  description: "Upload a target-field image. Spot centroids become tweezers, and integrated spot brightness seeds their relative intensity.",
+  description: "Upload a target-field image. Image pattern mode traces shapes or text with a point cloud; centroid mode extracts isolated spots.",
   upload: "Upload tweezer image",
   applied: "tweezers",
 } : {
@@ -96,10 +108,12 @@ const destinationCopy = computed(() => props.destination === "tweezers" ? {
 
 function detectionOptions(): SpotDetectionOptions {
   return {
+    mode: extractionMode.value,
     polarity: polarity.value,
     threshold: thresholdPercent.value / 100,
     minimumAreaPx: minimumAreaPx.value,
     maximumPoints: maximumPoints.value,
+    patternSpacingPx: patternSpacingPx.value,
   };
 }
 
@@ -204,6 +218,8 @@ function startDetector(image: ImageData): void {
     discardedSmall.value = response.discardedSmallComponents;
     discardedLarge.value = response.discardedLargeComponents;
     discardedByLimit.value = response.discardedByLimit;
+    sourcePixelCount.value = response.sourcePixelCount;
+    effectiveSpacingPx.value = response.effectiveSpacingPx;
     elapsedMs.value = response.elapsedMs;
     running.value = false;
     errorMessage.value = "";
@@ -258,22 +274,27 @@ function drawPreview(): void {
   previewContext.drawImage(sourceCanvas, 0, 0);
   const scale = Math.max(1, Math.min(canvas.width, canvas.height) / 420);
   detections.value.forEach((point, index) => {
-    const radius = Math.max(5 * scale, Math.sqrt(point.areaPx / Math.PI) + 3 * scale);
+    const pattern = extractionMode.value === "PATTERN";
+    const radius = pattern
+      ? Math.max(1.4 * scale, effectiveSpacingPx.value * 0.32)
+      : Math.max(5 * scale, Math.sqrt(point.areaPx / Math.PI) + 3 * scale);
     previewContext.save();
     previewContext.strokeStyle = "#b9f36b";
-    previewContext.fillStyle = "rgba(8,17,15,.84)";
-    previewContext.lineWidth = Math.max(1.5, 1.5 * scale);
+    previewContext.fillStyle = pattern ? "rgba(185,243,107,.62)" : "rgba(8,17,15,.84)";
+    previewContext.lineWidth = pattern ? Math.max(0.75, 0.75 * scale) : Math.max(1.5, 1.5 * scale);
     previewContext.beginPath();
     previewContext.arc(point.xPx, point.yPx, radius, 0, Math.PI * 2);
     previewContext.fill();
     previewContext.stroke();
-    previewContext.beginPath();
-    previewContext.moveTo(point.xPx - radius * 0.55, point.yPx);
-    previewContext.lineTo(point.xPx + radius * 0.55, point.yPx);
-    previewContext.moveTo(point.xPx, point.yPx - radius * 0.55);
-    previewContext.lineTo(point.xPx, point.yPx + radius * 0.55);
-    previewContext.stroke();
-    if (detections.value.length <= 100) {
+    if (!pattern) {
+      previewContext.beginPath();
+      previewContext.moveTo(point.xPx - radius * 0.55, point.yPx);
+      previewContext.lineTo(point.xPx + radius * 0.55, point.yPx);
+      previewContext.moveTo(point.xPx, point.yPx - radius * 0.55);
+      previewContext.lineTo(point.xPx, point.yPx + radius * 0.55);
+      previewContext.stroke();
+    }
+    if (!pattern && detections.value.length <= 100) {
       previewContext.fillStyle = "#e6eee8";
       previewContext.font = `${Math.max(9, 9 * scale)}px 'DM Mono', monospace`;
       previewContext.fillText(String(index + 1), point.xPx + radius + 2 * scale, point.yPx - radius * 0.45);
@@ -327,6 +348,14 @@ function reset(): void {
   draggingOver.value = false;
   errorMessage.value = "";
   appliedCount.value = null;
+  extractionMode.value = props.destination === "tweezers" ? "PATTERN" : "CENTROIDS";
+  thresholdPercent.value = props.destination === "tweezers" ? 20 : 62;
+  minimumAreaPx.value = 3;
+  maximumPoints.value = 256;
+  patternSpacingPx.value = 2;
+  polarity.value = "BRIGHT";
+  sourcePixelCount.value = 0;
+  effectiveSpacingPx.value = 0;
 }
 
 function terminateDetector(): void {
@@ -345,7 +374,7 @@ function roundedFieldSize(value: number): number {
   return Math.max(0.001, Math.round(value * 1000) / 1000);
 }
 
-watch([thresholdPercent, minimumAreaPx, maximumPoints, polarity], scheduleDetection);
+watch([extractionMode, thresholdPercent, minimumAreaPx, maximumPoints, patternSpacingPx, polarity], scheduleDetection);
 watch([fieldWidthUm, fieldHeightUm], () => { appliedCount.value = null; });
 
 onBeforeUnmount(() => {
@@ -396,7 +425,14 @@ defineExpose({ reset });
           <button type="button" :disabled="disabled" @click="reset">Remove image</button>
         </div>
 
-        <label>SPOT POLARITY
+        <label>EXTRACTION MODE
+          <select v-model="extractionMode" :disabled="disabled">
+            <option value="PATTERN">Image pattern / trace shape</option>
+            <option value="CENTROIDS">Isolated spot centroids</option>
+          </select>
+        </label>
+
+        <label>SIGNAL POLARITY
           <select v-model="polarity" :disabled="disabled">
             <option value="BRIGHT">Bright spots</option>
             <option value="DARK">Dark spots</option>
@@ -409,8 +445,11 @@ defineExpose({ reset });
         </div>
 
         <div class="target-image-number-grid">
-          <label>MIN BLOB / PX
+          <label>{{ extractionMode === "PATTERN" ? "NOISE BLOB / PX" : "MIN BLOB / PX" }}
             <input v-model.number="minimumAreaPx" type="number" min="1" max="10000" step="1" :disabled="disabled">
+          </label>
+          <label v-if="extractionMode === 'PATTERN'">SAMPLE SPACING / PX
+            <input v-model.number="patternSpacingPx" type="number" min="1" max="64" step="1" :disabled="disabled">
           </label>
           <label>POINT LIMIT
             <input v-model.number="maximumPoints" type="number" min="1" max="1000" step="1" :disabled="disabled">
@@ -429,7 +468,7 @@ defineExpose({ reset });
 
         <ComputationActivity
           v-if="running"
-          label="DETECTING SPOT CENTROIDS"
+          :label="extractionMode === 'PATTERN' ? 'SAMPLING IMAGE PATTERN' : 'DETECTING SPOT CENTROIDS'"
           :detail="`${analysisWidth} × ${analysisHeight} / DEDICATED WORKER`"
           :elapsed-ms="elapsedMs"
           :progress="null"

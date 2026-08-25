@@ -1,5 +1,6 @@
 import type {
   DetectedImagePoint,
+  ImageExtractionMode,
   SpotDetectionOptions,
   SpotDetectionResult,
 } from "../lib/image-points.js";
@@ -24,9 +25,12 @@ export type TargetImageWorkerResponse =
       kind: "TARGET_IMAGE_RESULT";
       jobId: number;
       points: DetectedImagePoint[];
+      mode: ImageExtractionMode;
       thresholdSignal: number;
       minimumSignal: number;
       maximumSignal: number;
+      sourcePixelCount: number;
+      effectiveSpacingPx: number;
       discardedSmallComponents: number;
       discardedLargeComponents: number;
       discardedByLimit: number;

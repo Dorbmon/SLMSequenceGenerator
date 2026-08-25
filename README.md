@@ -51,11 +51,13 @@ replace the target JSON.
 
 The `/tweezers` workspace generates a single SLM frame directly from optical
 tweezer coordinates, requested phases, and relative intensities. Inputs can be
-edited in the table or as JSON. It also accepts target-field images: detected
-spot centroids become tweezer coordinates, integrated spot power seeds relative
-intensity, and imported phases start at zero for subsequent editing. The
-resulting 8-bit frame can be downloaded as raw pixels, a standards-compatible
-grayscale BMP, or with its JSON metadata.
+edited in the table or as JSON. It also accepts target-field images in two
+modes: isolated-spot mode converts connected components to centroids, while
+image-pattern mode samples text and other connected shapes into a spatially
+uniform point cloud. Integrated pixel signal seeds relative intensity, and
+imported phases start at zero for subsequent editing. The resulting 8-bit frame
+can be downloaded as raw pixels, a standards-compatible grayscale BMP, or with
+its JSON metadata.
 
 Browser calculations run in a dedicated Web Worker. The interface, progress
 animations, navigation, and elapsed-time display remain responsive while Wasm

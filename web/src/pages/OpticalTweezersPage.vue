@@ -81,6 +81,22 @@ const jsonStatusLabel = computed(() => {
 });
 const maximumPlotX = computed(() => Math.max(5, ...tweezers.value.map((tweezer) => Math.abs(finiteOrZero(tweezer.xUm)))) * 1.18);
 const maximumPlotY = computed(() => Math.max(5, ...tweezers.value.map((tweezer) => Math.abs(finiteOrZero(tweezer.yUm)))) * 1.18);
+const densePlotGeometry = computed(() => {
+  if (tweezers.value.length <= 48) return null;
+  const xValues = tweezers.value.map((tweezer) => finiteOrZero(tweezer.xUm));
+  const yValues = tweezers.value.map((tweezer) => finiteOrZero(tweezer.yUm));
+  const minimumX = Math.min(...xValues);
+  const maximumX = Math.max(...xValues);
+  const minimumY = Math.min(...yValues);
+  const maximumY = Math.max(...yValues);
+  const spanX = Math.max(0.1, maximumX - minimumX);
+  const spanY = Math.max(0.1, maximumY - minimumY);
+  return {
+    centerX: (minimumX + maximumX) / 2,
+    centerY: (minimumY + maximumY) / 2,
+    scale: Math.min(520 / (spanX * 1.08), 240 / (spanY * 1.08)),
+  };
+});
 
 watch(tweezers, () => {
   if (suppressTableSync) return;
@@ -246,6 +262,10 @@ function updateComputeBackend(event: Event): void {
 function calibrationFor(input: readonly OpticalTweezerInput[]): CalibrationPackage {
   const maximumX = Math.max(1, ...input.map((tweezer) => Math.abs(tweezer.xUm)));
   const maximumY = Math.max(1, ...input.map((tweezer) => Math.abs(tweezer.yUm)));
+  const uniformScale = Math.min(
+    fftWidth.value * 0.4 / maximumX,
+    fftHeight.value * 0.4 / maximumY,
+  );
   return {
     manifest: {
       calibrationId: "browser-single-frame",
@@ -259,8 +279,8 @@ function calibrationFor(input: readonly OpticalTweezerInput[]): CalibrationPacka
     coordinateTransform: {
       originXUm: fftWidth.value / 2,
       originYUm: fftHeight.value / 2,
-      scaleX: fftWidth.value * 0.4 / maximumX,
-      scaleY: fftHeight.value * 0.4 / maximumY,
+      scaleX: uniformScale,
+      scaleY: uniformScale,
     },
   };
 }
@@ -446,10 +466,16 @@ async function loadJson(event: Event): Promise<void> {
 }
 
 function plotX(value: number): number {
+  if (densePlotGeometry.value) {
+    return 320 + (finiteOrZero(value) - densePlotGeometry.value.centerX) * densePlotGeometry.value.scale;
+  }
   return 320 + finiteOrZero(value) / maximumPlotX.value * 255;
 }
 
 function plotY(value: number): number {
+  if (densePlotGeometry.value) {
+    return 160 - (finiteOrZero(value) - densePlotGeometry.value.centerY) * densePlotGeometry.value.scale;
+  }
   return 160 - finiteOrZero(value) / maximumPlotY.value * 122;
 }
 
@@ -495,12 +521,12 @@ defineExpose({ reset });
         <div class="tweezer-plane" aria-label="Optical tweezer coordinate and phase preview">
           <svg viewBox="0 0 640 320" role="img">
             <title>Optical tweezer coordinate and phase preview</title>
-            <line x1="40" y1="160" x2="600" y2="160"></line>
-            <line x1="320" y1="24" x2="320" y2="296"></line>
+            <line x1="40" :y1="plotY(0)" x2="600" :y2="plotY(0)"></line>
+            <line :x1="plotX(0)" y1="24" :x2="plotX(0)" y2="296"></line>
             <g v-for="(tweezer, index) in tweezers" :key="`${tweezer.trapId}:${index}`">
-              <circle class="tweezer-phase-glow" :cx="plotX(tweezer.xUm)" :cy="plotY(tweezer.yUm)" r="15" :fill="phaseColor(tweezer.phaseRad)"></circle>
-              <circle class="tweezer-phase-point" :cx="plotX(tweezer.xUm)" :cy="plotY(tweezer.yUm)" r="5" :fill="phaseColor(tweezer.phaseRad)"></circle>
-              <text :x="plotX(tweezer.xUm) + 10" :y="plotY(tweezer.yUm) - 9">{{ tweezer.trapId }} / {{ phaseDegrees(tweezer.phaseRad) }}</text>
+              <circle class="tweezer-phase-glow" :cx="plotX(tweezer.xUm)" :cy="plotY(tweezer.yUm)" :r="densePlotGeometry ? 4 : 15" :fill="phaseColor(tweezer.phaseRad)"></circle>
+              <circle class="tweezer-phase-point" :cx="plotX(tweezer.xUm)" :cy="plotY(tweezer.yUm)" :r="densePlotGeometry ? 2 : 5" :fill="phaseColor(tweezer.phaseRad)"></circle>
+              <text v-if="!densePlotGeometry" :x="plotX(tweezer.xUm) + 10" :y="plotY(tweezer.yUm) - 9">{{ tweezer.trapId }} / {{ phaseDegrees(tweezer.phaseRad) }}</text>
             </g>
           </svg>
           <div class="tweezer-plane-caption"><span>PHASE / HUE</span><span>UM PLANE / TOP VIEW</span></div>
