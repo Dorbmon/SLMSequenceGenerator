@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { encodeGrayscaleBmp } from "./bmp.js";
+import { decodeGrayscaleBmp, encodeGrayscaleBmp } from "./bmp.js";
 
 describe("encodeGrayscaleBmp", () => {
   it("writes an 8-bit indexed BMP with padded bottom-up rows", () => {
@@ -25,5 +25,21 @@ describe("encodeGrayscaleBmp", () => {
 
   it("rejects mismatched frame dimensions", () => {
     expect(() => encodeGrayscaleBmp(new Uint8Array(3), 2, 2)).toThrow(/pixel count/i);
+  });
+
+  it("round-trips an indexed grayscale SLM frame", () => {
+    const source = new Uint8Array([
+      0, 17, 255,
+      93, 128, 201,
+    ]);
+    const decoded = decodeGrayscaleBmp(encodeGrayscaleBmp(source, 3, 2));
+    expect(decoded.width).toBe(3);
+    expect(decoded.height).toBe(2);
+    expect(decoded.pixels).toEqual(source);
+  });
+
+  it("rejects truncated BMP pixel data", () => {
+    const bmp = encodeGrayscaleBmp(new Uint8Array(16), 4, 4);
+    expect(() => decodeGrayscaleBmp(bmp.slice(0, -2))).toThrow(/truncated/i);
   });
 });

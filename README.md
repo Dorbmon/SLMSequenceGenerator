@@ -57,7 +57,13 @@ image-pattern mode samples text and other connected shapes into a spatially
 uniform point cloud. Integrated pixel signal seeds relative intensity, and
 imported phases start at zero for subsequent editing. The resulting 8-bit frame
 can be downloaded as raw pixels, a standards-compatible grayscale BMP, or with
-its JSON metadata.
+its JSON metadata. A forward-simulation panel accepts the exported indexed BMP
+or a raw U8 phase-code frame, applies the same uniform active aperture and
+centered power-of-two FFT model in a dedicated worker, and renders the
+FFT-shifted focal-plane intensity on a linear or adjustable decibel scale. The
+normalized intensity field can also be exported as a display BMP or Float32
+raw array. Forward propagation supports both Wasm and a GPU-resident WebGPU
+path.
 
 Browser calculations run in a dedicated Web Worker. The interface, progress
 animations, navigation, and elapsed-time display remain responsive while Wasm

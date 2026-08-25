@@ -5,6 +5,7 @@ import {
   type FrameMetrics,
 } from "../../../src/index.js";
 import ComputationActivity from "../components/ComputationActivity.vue";
+import ForwardSimulator from "../components/ForwardSimulator.vue";
 import SlmFramePreview from "../components/SlmFramePreview.vue";
 import TargetImageImporter from "../components/TargetImageImporter.vue";
 import { encodeGrayscaleBmp } from "../lib/bmp.js";
@@ -37,6 +38,10 @@ interface TargetImageImporterHandle {
   reset(): void;
 }
 
+interface ForwardSimulatorHandle {
+  reset(): void;
+}
+
 const props = defineProps<{
   webgpuAvailable: boolean;
   webgpuStatus: string;
@@ -44,6 +49,7 @@ const props = defineProps<{
 
 const upload = ref<HTMLInputElement | null>(null);
 const targetImageImporter = ref<TargetImageImporterHandle | null>(null);
+const forwardSimulator = ref<ForwardSimulatorHandle | null>(null);
 const tweezers = ref<OpticalTweezerInput[]>(cloneOpticalTweezers(DEFAULT_OPTICAL_TWEEZERS));
 const jsonDraft = ref(serializeOpticalTweezers(tweezers.value));
 const jsonStatus = ref<JsonStatus>("synced");
@@ -229,6 +235,7 @@ function reset(): void {
   nextTick(() => {
     suppressTableSync = false;
     targetImageImporter.value?.reset();
+    forwardSimulator.value?.reset();
   });
 }
 
@@ -654,5 +661,14 @@ defineExpose({ reset });
       <div><small>DIFFRACTION EFFICIENCY</small><strong>{{ metrics ? `${(metrics.diffractionEfficiency * 100).toFixed(1)}%` : "--" }}</strong></div>
       <div><small>MAX PHASE ERROR</small><strong>{{ metrics ? `${metrics.maximumTargetPhaseErrorRad.toFixed(2)} rad` : "--" }}</strong></div>
     </div>
+
+    <ForwardSimulator
+      ref="forwardSimulator"
+      :generated-pixels="outputPixels"
+      :generated-width="slmWidth"
+      :generated-height="slmHeight"
+      :webgpu-available="webgpuAvailable"
+      :webgpu-status="webgpuStatus"
+    />
   </section>
 </template>

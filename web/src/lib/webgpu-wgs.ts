@@ -450,7 +450,7 @@ export class WebGpuSequentialWgsSolver implements SequentialHologramBackend {
       ],
     });
     const pipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [layout] });
-    const module = this.device.createShaderModule({ label: "Radix-2 FFT", code: FFT_SHADER });
+    const module = this.device.createShaderModule({ label: "Radix-2 FFT", code: WEBGPU_RADIX2_FFT_SHADER });
     [this.bitReversePipeline, this.fftPipeline] = await Promise.all([
       this.device.createComputePipelineAsync({
         label: "FFT bit reversal",
@@ -1009,7 +1009,7 @@ function nowMs(): number {
   return typeof performance !== "undefined" ? performance.now() : Date.now();
 }
 
-const FFT_SHADER = /* wgsl */ `
+export const WEBGPU_RADIX2_FFT_SHADER = /* wgsl */ `
 struct FftParameters {
   width: u32,
   height: u32,
