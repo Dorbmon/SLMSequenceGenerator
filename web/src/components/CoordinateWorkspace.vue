@@ -547,7 +547,7 @@ function handleUpload(event: Event, target: "initial" | "target" | "request"): v
 
 function resizeCanvas(fit = false): void {
   if (!canvas.value || !context) return;
-  const ratio = window.devicePixelRatio || 1;
+  const ratio = Math.min(window.devicePixelRatio || 1, 2);
   const bounds = canvas.value.getBoundingClientRect();
   canvas.value.width = Math.max(1, Math.round(bounds.width * ratio));
   canvas.value.height = Math.max(1, Math.round(bounds.height * ratio));

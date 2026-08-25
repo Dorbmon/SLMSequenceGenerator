@@ -123,7 +123,7 @@ function draw(): void {
 
 function resizeCanvas(): void {
   if (!canvas.value || !context) return;
-  const ratio = window.devicePixelRatio || 1;
+  const ratio = Math.min(window.devicePixelRatio || 1, 2);
   const bounds = canvas.value.getBoundingClientRect();
   canvas.value.width = Math.max(1, Math.round(bounds.width * ratio));
   canvas.value.height = Math.max(1, Math.round(bounds.height * ratio));
@@ -157,7 +157,7 @@ onBeforeUnmount(() => {
       <span class="frame-counter">FRAME {{ String(frame).padStart(2, "0") }} / {{ String(total).padStart(2, "0") }}</span>
     </div>
     <div class="canvas-wrap">
-      <canvas ref="canvas" width="760" height="540" aria-label="Atom rearrangement preview"></canvas>
+      <canvas ref="canvas" class="array-canvas" width="760" height="540" aria-label="Atom rearrangement preview"></canvas>
       <div class="canvas-label"><span>{{ canvasState }}</span><span>UM PLANE / TOP VIEW</span></div>
     </div>
     <div class="preview-footer">
