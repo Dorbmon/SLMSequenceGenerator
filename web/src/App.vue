@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, shallowRef } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef } from "vue";
 import {
   SlmSequenceCompiler,
   type CalibrationPackage,
@@ -14,6 +14,7 @@ import CompilerControls from "./components/CompilerControls.vue";
 import CoordinateWorkspace from "./components/CoordinateWorkspace.vue";
 import { DEFAULT_INITIAL_ATOMS, DEFAULT_TARGET_SITES } from "./data/defaults.js";
 import { cloneAtoms, cloneTargets } from "./lib/coordinates.js";
+import OpticalTweezersPage from "./pages/OpticalTweezersPage.vue";
 import {
   DEFAULT_SLM_HEIGHT,
   DEFAULT_SLM_WIDTH,
@@ -26,6 +27,10 @@ interface CoordinateEditorHandle {
   resetEditor(): void;
 }
 
+interface OpticalTweezersPageHandle {
+  reset(): void;
+}
+
 interface LogLine {
   text: string;
   state?: "active" | "done";
@@ -34,6 +39,9 @@ interface LogLine {
 type CompilationState = "idle" | "running" | "accepted" | "rejected";
 
 const coordinateEditor = ref<CoordinateEditorHandle | null>(null);
+const opticalTweezersPage = ref<OpticalTweezersPageHandle | null>(null);
+const activePath = ref(pagePath());
+const isTweezerPage = computed(() => activePath.value === "/tweezers");
 const initialAtoms = ref<InitialAtom[]>(cloneAtoms(DEFAULT_INITIAL_ATOMS));
 const targetSites = ref<TargetSite[]>(cloneTargets(DEFAULT_TARGET_SITES));
 const sequence = shallowRef<CompiledSequenceHandle | null>(null);
@@ -349,24 +357,56 @@ function reset(): void {
   nextTick(() => coordinateEditor.value?.resetEditor());
 }
 
+function resetActivePage(): void {
+  if (isTweezerPage.value) opticalTweezersPage.value?.reset();
+  else reset();
+}
+
+function pagePath(): "/" | "/tweezers" {
+  return window.location.pathname === "/tweezers" || window.location.pathname.startsWith("/tweezers/") ? "/tweezers" : "/";
+}
+
+function navigate(event: MouseEvent, path: "/" | "/tweezers"): void {
+  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  event.preventDefault();
+  if (activePath.value !== path) window.history.pushState(null, "", path);
+  activePath.value = path;
+  document.title = path === "/tweezers" ? "Optical Tweezer Frame | SLM Compiler" : "SLM Sequence Compiler";
+  window.scrollTo({ top: 0, behavior: "instant" });
+}
+
+function handlePopState(): void {
+  activePath.value = pagePath();
+}
+
+onMounted(() => {
+  window.addEventListener("popstate", handlePopState);
+  document.title = isTweezerPage.value ? "Optical Tweezer Frame | SLM Compiler" : "SLM Sequence Compiler";
+});
+
 onBeforeUnmount(() => {
   compileGeneration += 1;
   stopPlayback();
+  window.removeEventListener("popstate", handlePopState);
 });
 </script>
 
 <template>
   <main class="app-shell">
     <header class="topbar">
-      <a class="brand" href="/" aria-label="SLM compiler home">
+      <a class="brand" href="/" aria-label="SLM compiler home" @click="navigate($event, '/')">
         <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
         <span>SLM COMPILER</span>
       </a>
+      <nav class="page-nav" aria-label="Compiler workspaces">
+        <a href="/" :class="{ 'is-active': !isTweezerPage }" :aria-current="!isTweezerPage ? 'page' : undefined" @click="navigate($event, '/')">Sequence</a>
+        <a href="/tweezers" :class="{ 'is-active': isTweezerPage }" :aria-current="isTweezerPage ? 'page' : undefined" @click="navigate($event, '/tweezers')">Tweezer frame</a>
+      </nav>
       <div class="topbar-status"><span class="status-dot"></span> READY / WASM CORE</div>
-      <button class="reset-button" type="button" @click="reset">Reset</button>
+      <button class="reset-button" type="button" @click="resetActivePage">Reset</button>
     </header>
 
-    <section class="workspace">
+    <section v-show="!isTweezerPage" class="workspace">
       <div class="workspace-heading">
         <div>
           <p class="eyebrow">Sequence workspace</p>
@@ -426,5 +466,6 @@ onBeforeUnmount(() => {
         <div><small>ASSIGNMENT COST</small><strong>{{ metricCost }}</strong></div>
       </div>
     </section>
+    <OpticalTweezersPage v-show="isTweezerPage" ref="opticalTweezersPage" />
   </main>
 </template>

@@ -42,6 +42,11 @@ moving, inspecting, and removing initial atoms and target sites. Every visual
 change is reflected in the JSON inputs, which remain available for direct edits
 and imports.
 
+The `/tweezers` workspace generates a single SLM frame directly from optical
+tweezer coordinates, requested phases, and relative intensities. Inputs can be
+edited in the table or as JSON, and the resulting 8-bit frame can be downloaded
+as raw pixels, a PNG preview, or with its JSON metadata.
+
 SLM output defaults to 1272×1024 pixels. Width and height can be changed from
 the compiler controls before a run; exported frame dimensions follow those
 values. Non-power-of-two dimensions are centered on a zero-padded power-of-two

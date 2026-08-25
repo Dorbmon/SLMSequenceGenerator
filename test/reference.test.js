@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  SequentialWgsSolver,
   SlmSequenceCompiler,
   createComplexField,
   createSequencePackage,
@@ -124,6 +125,29 @@ test("crops a padded FFT grid to the active SLM resolution", async () => {
   assert.ok(sequence.slmFrameDescriptors.every((descriptor) => descriptor.width === 6 && descriptor.height === 4));
   assert.equal(createSequencePackage(sequence)["slm-frames.bin"].length, frames.length * 24);
   assert.equal(verifySequencePackage(sequence).valid, true);
+});
+
+test("generates a direct phase-locked optical tweezer frame", () => {
+  const solver = new SequentialWgsSolver(calibration(), {
+    width: 16,
+    height: 16,
+    firstFrameIterations: 4,
+    maxIterations: 4,
+    targetPhaseMode: "PHASE_LOCKED_WGS",
+    backgroundPolicy: "ZERO",
+    requireConvergence: false,
+  });
+  const result = solver.solveSequentialFrame({
+    frameIndex: 0,
+    timeUs: 0,
+    traps: [
+      { trapId: 1, atomId: null, xUm: -1, yUm: 0, intensity: 1, targetPhaseRad: 0, flags: 0 },
+      { trapId: 2, atomId: null, xUm: 1, yUm: 0, intensity: 1, targetPhaseRad: 1.2, flags: 0 },
+    ],
+  });
+  assert.equal(result.pixels.length, 16 * 16);
+  assert.equal(result.metrics.accepted, true);
+  assert.ok(result.metrics.maximumTargetPhaseErrorRad < 0.2);
 });
 
 test("routes a constrained crossing without collision", async () => {
