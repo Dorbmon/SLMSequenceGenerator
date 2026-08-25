@@ -10,6 +10,7 @@ const props = defineProps<{
   total: number;
   separation: number;
   canvasState: string;
+  running: boolean;
 }>();
 
 const canvas = ref<HTMLCanvasElement | null>(null);
@@ -158,6 +159,10 @@ onBeforeUnmount(() => {
     </div>
     <div class="canvas-wrap">
       <canvas ref="canvas" class="array-canvas" width="760" height="540" aria-label="Atom rearrangement preview"></canvas>
+      <div v-if="running" class="canvas-compute-overlay" aria-hidden="true">
+        <div class="field-orbits"><i></i><i></i><i></i><b></b></div>
+        <span>WORKER ACTIVE / INTERFACE RESPONSIVE</span>
+      </div>
       <div class="canvas-label"><span>{{ canvasState }}</span><span>UM PLANE / TOP VIEW</span></div>
     </div>
     <div class="preview-footer">

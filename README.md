@@ -47,6 +47,11 @@ tweezer coordinates, requested phases, and relative intensities. Inputs can be
 edited in the table or as JSON, and the resulting 8-bit frame can be downloaded
 as raw pixels, a PNG preview, or with its JSON metadata.
 
+Browser calculations run in a dedicated Web Worker. The interface, progress
+animations, navigation, and elapsed-time display remain responsive while Wasm
+is solving, and either sequence compilation or single-frame generation can be
+cancelled immediately.
+
 SLM output defaults to 1272×1024 pixels. Width and height can be changed from
 the compiler controls before a run; exported frame dimensions follow those
 values. Non-power-of-two dimensions are centered on a zero-padded power-of-two

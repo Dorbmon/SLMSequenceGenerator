@@ -6,6 +6,7 @@ const props = defineProps<{
   width: number;
   height: number;
   status: string;
+  running: boolean;
 }>();
 
 const canvas = ref<HTMLCanvasElement | null>(null);
@@ -79,6 +80,10 @@ onMounted(draw);
     </div>
     <div class="slm-frame-stage" :style="{ aspectRatio: `${width} / ${height}` }">
       <canvas ref="canvas" class="slm-phase-canvas" :aria-label="`SLM phase-code frame at ${width} by ${height} pixels`"></canvas>
+      <div v-if="running" class="canvas-compute-overlay" aria-hidden="true">
+        <div class="field-orbits"><i></i><i></i><i></i><b></b></div>
+        <span>PHASE FIELD / WORKER THREAD</span>
+      </div>
       <div class="canvas-label"><span>{{ status }}</span><span>DISPLAY PLANE / PHASE CODE</span></div>
     </div>
     <div class="preview-footer">

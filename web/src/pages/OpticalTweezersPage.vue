@@ -1,11 +1,10 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, shallowRef, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import {
-  SequentialWgsSolver,
-  crc32,
   type CalibrationPackage,
   type FrameMetrics,
 } from "../../../src/index.js";
+import ComputationActivity from "../components/ComputationActivity.vue";
 import SlmFramePreview from "../components/SlmFramePreview.vue";
 import {
   DEFAULT_SLM_HEIGHT,
@@ -19,14 +18,17 @@ import {
   DEFAULT_OPTICAL_TWEEZERS,
   cloneOpticalTweezers,
   nextTweezerId,
-  opticalTweezersToFrame,
   parseOpticalTweezers,
   serializeOpticalTweezers,
   type OpticalTweezerInput,
 } from "../lib/tweezers.js";
+import type {
+  CompilerWorkerRequest,
+  CompilerWorkerResponse,
+} from "../workers/compiler-messages.js";
 
 type JsonStatus = "synced" | "dirty" | "invalid";
-type OutputState = "idle" | "running" | "accepted" | "rejected";
+type OutputState = "idle" | "running" | "accepted" | "rejected" | "cancelled";
 
 const upload = ref<HTMLInputElement | null>(null);
 const tweezers = ref<OpticalTweezerInput[]>(cloneOpticalTweezers(DEFAULT_OPTICAL_TWEEZERS));
@@ -44,6 +46,9 @@ const errorMessage = ref("");
 const checksum = ref<number | null>(null);
 let suppressTableSync = false;
 let generation = 0;
+let frameWorker: Worker | null = null;
+let elapsedTimer = 0;
+let calculationStarted = 0;
 
 const fftWidth = computed(() => fftDimensionFor(slmWidth.value));
 const fftHeight = computed(() => fftDimensionFor(slmHeight.value));
@@ -51,6 +56,7 @@ const phaseStatus = computed(() => {
   if (running.value) return "SOLVING / WASM WGS";
   if (outputState.value === "accepted") return "FRAME ACCEPTED";
   if (outputState.value === "rejected") return "GENERATION REJECTED";
+  if (outputState.value === "cancelled") return "GENERATION CANCELLED";
   return "AWAITING TWEEZER INPUT";
 });
 const jsonStatusLabel = computed(() => {
@@ -74,6 +80,9 @@ function finiteOrZero(value: unknown): number {
 
 function invalidateOutput(): void {
   generation += 1;
+  terminateFrameWorker();
+  stopElapsedClock();
+  running.value = false;
   outputPixels.value = null;
   metrics.value = null;
   elapsedMs.value = null;
@@ -134,6 +143,8 @@ function removeTweezer(index: number): void {
 
 function reset(): void {
   generation += 1;
+  terminateFrameWorker();
+  stopElapsedClock();
   suppressTableSync = true;
   tweezers.value = cloneOpticalTweezers(DEFAULT_OPTICAL_TWEEZERS);
   jsonDraft.value = serializeOpticalTweezers(tweezers.value);
@@ -197,50 +208,105 @@ function calibrationFor(input: readonly OpticalTweezerInput[]): CalibrationPacka
   };
 }
 
-async function generateFrame(): Promise<void> {
+function generateFrame(): void {
   if (running.value) return;
   const input = validatedTweezers();
   if (!input) return;
-  const activeGeneration = ++generation;
+  terminateFrameWorker();
+  const jobId = ++generation;
   running.value = true;
   outputState.value = "running";
   outputPixels.value = null;
   metrics.value = null;
-  elapsedMs.value = null;
+  elapsedMs.value = 0;
   checksum.value = null;
   errorMessage.value = "";
+  startElapsedClock();
 
-  await nextTick();
-  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-  const started = performance.now();
-  try {
-    const solver = new SequentialWgsSolver(calibrationFor(input), {
-      width: fftWidth.value,
-      height: fftHeight.value,
-      format: "UINT8",
-      firstFrameIterations: iterations.value,
-      subsequentFrameIterations: iterations.value,
-      maxIterations: iterations.value,
-      targetPhaseMode: "PHASE_LOCKED_WGS",
-      backgroundPolicy: "ZERO",
-      requireConvergence: false,
-      measureSolveTime: true,
-    });
-    const result = solver.solveSequentialFrame(opticalTweezersToFrame(input));
-    if (activeGeneration !== generation) return;
-    outputPixels.value = result.pixels;
-    metrics.value = result.metrics;
-    elapsedMs.value = performance.now() - started;
-    checksum.value = crc32(bytesFor(result.pixels));
-    outputState.value = result.metrics.accepted ? "accepted" : "rejected";
-    if (!result.metrics.accepted) errorMessage.value = "The generated frame did not pass the numerical quality checks";
-  } catch (error) {
-    if (activeGeneration !== generation) return;
-    outputState.value = "rejected";
-    errorMessage.value = error instanceof Error ? error.message : "Unable to generate the SLM frame";
-  } finally {
-    if (activeGeneration === generation) running.value = false;
-  }
+  const worker = new Worker(new URL("../workers/compiler.worker.ts", import.meta.url), { type: "module" });
+  frameWorker = worker;
+  worker.onmessage = (event: MessageEvent<CompilerWorkerResponse>) => {
+    const response = event.data;
+    if (response.jobId !== jobId || jobId !== generation) return;
+    if (response.kind === "WORKER_ERROR") {
+      rejectFrame(response.message, jobId, worker);
+      return;
+    }
+    if (response.kind !== "TWEEZER_FRAME_RESULT") return;
+    outputPixels.value = response.format === "UINT16" ? new Uint16Array(response.buffer) : new Uint8Array(response.buffer);
+    metrics.value = response.metrics;
+    elapsedMs.value = response.elapsedMs;
+    checksum.value = response.checksum;
+    outputState.value = response.metrics.accepted ? "accepted" : "rejected";
+    if (!response.metrics.accepted) errorMessage.value = "The generated frame did not pass the numerical quality checks";
+    running.value = false;
+    stopElapsedClock(response.elapsedMs);
+    disposeFrameWorker(worker);
+  };
+  worker.onerror = (event: ErrorEvent) => {
+    if (jobId !== generation) return;
+    rejectFrame(event.message || "SLM frame worker failed", jobId, worker);
+  };
+  const request: CompilerWorkerRequest = {
+    kind: "GENERATE_TWEEZER_FRAME",
+    jobId,
+    input: {
+      tweezers: input,
+      slmWidth: slmWidth.value,
+      slmHeight: slmHeight.value,
+      fftWidth: fftWidth.value,
+      fftHeight: fftHeight.value,
+      iterations: iterations.value,
+    },
+  };
+  worker.postMessage(request);
+}
+
+function rejectFrame(message: string, jobId: number, worker: Worker): void {
+  if (jobId !== generation) return;
+  running.value = false;
+  outputState.value = "rejected";
+  errorMessage.value = message;
+  stopElapsedClock();
+  disposeFrameWorker(worker);
+}
+
+function cancelGeneration(): void {
+  if (!running.value) return;
+  generation += 1;
+  terminateFrameWorker();
+  stopElapsedClock();
+  running.value = false;
+  outputState.value = "cancelled";
+  outputPixels.value = null;
+  metrics.value = null;
+  checksum.value = null;
+  errorMessage.value = "";
+}
+
+function startElapsedClock(): void {
+  stopElapsedClock();
+  calculationStarted = performance.now();
+  elapsedMs.value = 0;
+  elapsedTimer = window.setInterval(() => {
+    elapsedMs.value = performance.now() - calculationStarted;
+  }, 100);
+}
+
+function stopElapsedClock(finalElapsedMs?: number): void {
+  window.clearInterval(elapsedTimer);
+  elapsedTimer = 0;
+  if (finalElapsedMs !== undefined) elapsedMs.value = finalElapsedMs;
+}
+
+function disposeFrameWorker(worker: Worker): void {
+  worker.terminate();
+  if (frameWorker === worker) frameWorker = null;
+}
+
+function terminateFrameWorker(): void {
+  frameWorker?.terminate();
+  frameWorker = null;
 }
 
 function bytesFor(pixels: Uint8Array | Uint16Array): Uint8Array {
@@ -356,6 +422,12 @@ function phaseDegrees(phase: number): string {
   return `${(finiteOrZero(phase) * 180 / Math.PI).toFixed(1)}°`;
 }
 
+onBeforeUnmount(() => {
+  generation += 1;
+  terminateFrameWorker();
+  stopElapsedClock();
+});
+
 defineExpose({ reset });
 </script>
 
@@ -431,6 +503,7 @@ defineExpose({ reset });
           :width="slmWidth"
           :height="slmHeight"
           :status="phaseStatus"
+          :running="running"
         />
 
         <section class="panel tweezer-generator" aria-labelledby="frame-generator-title">
@@ -457,9 +530,16 @@ defineExpose({ reset });
               <div class="control-label"><span>WGS ITERATIONS</span><output>{{ String(iterations).padStart(2, "0") }} / FRAME</output></div>
               <input type="range" min="1" max="12" step="1" :value="iterations" :disabled="running" @input="updateIterations">
             </div>
+            <ComputationActivity
+              v-if="running"
+              label="SYNTHESIZING PHASE FIELD"
+              :detail="`${fftWidth} × ${fftHeight} FFT / DEDICATED WORKER`"
+              :elapsed-ms="elapsedMs ?? 0"
+              :progress="null"
+            />
             <p v-if="errorMessage" class="tweezer-error" role="alert">{{ errorMessage }}</p>
-            <button class="compile-button tweezer-generate-button" type="button" :disabled="running" @click="generateFrame">
-              <span></span>{{ running ? "Generating SLM frame..." : "Generate SLM frame" }}
+            <button class="compile-button tweezer-generate-button" :class="{ 'is-running': running }" type="button" @click="running ? cancelGeneration() : generateFrame()">
+              <span></span>{{ running ? "Cancel generation" : "Generate SLM frame" }}
             </button>
             <div class="tweezer-export-actions">
               <button type="button" :disabled="!outputPixels || running" @click="exportRawFrame">Raw frame <b>&darr;</b></button>

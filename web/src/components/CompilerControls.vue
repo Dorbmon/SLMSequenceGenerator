@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ComputationActivity from "./ComputationActivity.vue";
 import { MAX_SLM_DIMENSION, MIN_SLM_DIMENSION } from "../lib/resolution.js";
 
 interface CompilerLogLine {
@@ -16,6 +17,9 @@ const props = defineProps<{
   phaseMode: string;
   badge: string;
   running: boolean;
+  elapsedMs: number;
+  progress: number | null;
+  progressLabel: string;
   canExport: boolean;
   logs: readonly CompilerLogLine[];
 }>();
@@ -27,6 +31,7 @@ const emit = defineEmits<{
   "update:slmHeight": [value: number];
   "update:phaseMode": [value: string];
   compile: [];
+  cancel: [];
   step: [];
   exportFrames: [];
   exportManifest: [];
@@ -149,8 +154,15 @@ function dimensionFromEvent(event: Event, fallback: number): number {
         <span>{{ String(index + 1).padStart(2, "0") }}</span><span>{{ line.text }}</span><b>&bull;</b>
       </div>
     </div>
-    <button class="compile-button" type="button" :disabled="running" @click="emit('compile')">
-      <span></span> {{ running ? "Compiling..." : "Compile sequence" }}
+    <ComputationActivity
+      v-if="running"
+      :label="progressLabel"
+      detail="DEDICATED WORKER / UI THREAD AVAILABLE"
+      :elapsed-ms="elapsedMs"
+      :progress="progress"
+    />
+    <button class="compile-button" :class="{ 'is-running': running }" type="button" @click="running ? emit('cancel') : emit('compile')">
+      <span></span> {{ running ? "Cancel compilation" : "Compile sequence" }}
     </button>
     <button class="step-button" type="button" :disabled="running" @click="emit('step')">
       Step one frame <b aria-hidden="true">&#8594;</b>
