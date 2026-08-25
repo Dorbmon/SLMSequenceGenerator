@@ -233,6 +233,12 @@ export interface CompileOptions {
   signal?: AbortSignal;
   onProgress?: (progress: CompileProgress) => void;
   outputStore?: FrameStore<Uint8Array | Uint16Array>;
+  /**
+   * Optional browser/backend integration point. The core compiler keeps all
+   * motion planning and validation unchanged while allowing an asynchronous
+   * hologram solver (for example, a GPU-resident WebGPU implementation).
+   */
+  hologramSolverFactory?: HologramSolverFactory;
 }
 
 export interface AtomAssignment {
@@ -321,6 +327,28 @@ export interface FrameMetrics {
   accepted: boolean;
   flags: string[];
 }
+
+export interface HologramSolveResult {
+  pixels: Uint8Array | Uint16Array;
+  metrics: FrameMetrics;
+  descriptor?: SlmFrameDescriptor;
+}
+
+export interface SequentialHologramBackend {
+  readonly backendId: string;
+  solveSequentialFrame(
+    frame: TrapFrame,
+    iterationBudget?: number,
+  ): HologramSolveResult | Promise<HologramSolveResult>;
+  commitFrameState(): void | Promise<void>;
+  rollbackToPreviousAcceptedFrame(): void | Promise<void>;
+  dispose?(): void | Promise<void>;
+}
+
+export type HologramSolverFactory = (
+  calibration: CalibrationPackage,
+  config: Required<HologramConfig>,
+) => SequentialHologramBackend | Promise<SequentialHologramBackend>;
 
 export interface SequenceManifest {
   formatVersion: string;

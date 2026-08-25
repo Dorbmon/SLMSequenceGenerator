@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import ComputationActivity from "./ComputationActivity.vue";
 import { MAX_SLM_DIMENSION, MIN_SLM_DIMENSION } from "../lib/resolution.js";
+import type { ComputeBackend } from "../workers/compiler-messages.js";
 
 interface CompilerLogLine {
   text: string;
@@ -15,6 +16,9 @@ const props = defineProps<{
   fftWidth: number;
   fftHeight: number;
   phaseMode: string;
+  computeBackend: ComputeBackend;
+  webgpuAvailable: boolean;
+  webgpuStatus: string;
   badge: string;
   running: boolean;
   elapsedMs: number;
@@ -30,6 +34,7 @@ const emit = defineEmits<{
   "update:slmWidth": [value: number];
   "update:slmHeight": [value: number];
   "update:phaseMode": [value: string];
+  "update:computeBackend": [value: ComputeBackend];
   compile: [];
   cancel: [];
   step: [];
@@ -43,6 +48,10 @@ function numberFromEvent(event: Event): number {
 
 function stringFromEvent(event: Event): string {
   return (event.target as HTMLSelectElement).value;
+}
+
+function backendFromEvent(event: Event): ComputeBackend {
+  return (event.target as HTMLSelectElement).value as ComputeBackend;
 }
 
 function dimensionFromEvent(event: Event, fallback: number): number {
@@ -142,6 +151,13 @@ function dimensionFromEvent(event: Event, fallback: number): number {
           <option>Phase locked WGS</option>
           <option>Soft phase locked</option>
         </select>
+      </label>
+      <label class="backend-choice">COMPUTE BACKEND
+        <select :value="computeBackend" :disabled="running" @change="emit('update:computeBackend', backendFromEvent($event))">
+          <option value="wasm">WebAssembly / CPU FFT</option>
+          <option value="webgpu" :disabled="!webgpuAvailable">WebGPU / GPU-resident WGS</option>
+        </select>
+        <small :class="{ 'is-available': webgpuAvailable }">{{ webgpuStatus }}</small>
       </label>
     </div>
     <div class="compile-log" aria-live="polite">

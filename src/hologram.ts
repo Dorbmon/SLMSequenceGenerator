@@ -10,18 +10,13 @@ import type {
   CalibrationPackage,
   FrameMetrics,
   HologramConfig,
+  HologramSolveResult,
   NormalizedInput,
   SlmFrameDescriptor,
   TrapFrame,
   TrapState,
 } from "./types.js";
 import { angularDistance, clamp, crc32, TAU, wrapPhase } from "./util.js";
-
-export interface HologramSolveResult {
-  pixels: Uint8Array | Uint16Array;
-  metrics: FrameMetrics;
-  descriptor?: SlmFrameDescriptor;
-}
 
 interface SolverState {
   phase: Float64Array;
@@ -34,6 +29,7 @@ interface SolverState {
 }
 
 export class SequentialWgsSolver {
+  readonly backendId = "wasm-fft-phase-locked-wgs";
   readonly width: number;
   readonly height: number;
   private readonly calibration: CalibrationPackage;

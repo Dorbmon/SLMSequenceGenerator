@@ -5,8 +5,13 @@ import {
   SlmSequenceCompiler,
   crc32,
   type CalibrationPackage,
+  type SequentialHologramBackend,
 } from "../../../src/index.js";
 import { opticalTweezersToFrame } from "../lib/tweezers.js";
+import {
+  inspectWebGpu,
+  WebGpuSequentialWgsSolver,
+} from "../lib/webgpu-wgs.js";
 import type {
   CompilerWorkerRequest,
   CompilerWorkerResponse,
@@ -32,11 +37,21 @@ scope.onmessage = (event: MessageEvent<CompilerWorkerRequest>): void => {
 };
 
 async function runJob(request: CompilerWorkerRequest): Promise<void> {
+  if (request.kind === "CHECK_WEBGPU") {
+    const capability = await inspectWebGpu();
+    const response: CompilerWorkerResponse = {
+      kind: "WEBGPU_CAPABILITY",
+      jobId: request.jobId,
+      ...capability,
+    };
+    scope.postMessage(response);
+    return;
+  }
   if (request.kind === "COMPILE_SEQUENCE") {
     await compileSequence(request.jobId, request.input);
     return;
   }
-  generateTweezerFrame(request.jobId, request.input);
+  await generateTweezerFrame(request.jobId, request.input);
 }
 
 async function compileSequence(jobId: number, input: SequenceWorkerInput): Promise<void> {
@@ -81,6 +96,11 @@ async function compileSequence(jobId: number, input: SequenceWorkerInput): Promi
       const response: CompilerWorkerResponse = { kind: "SEQUENCE_PROGRESS", jobId, progress };
       scope.postMessage(response);
     },
+    ...(input.backend === "webgpu" ? {
+      hologramSolverFactory: (solverCalibration: CalibrationPackage, solverConfig: Parameters<typeof WebGpuSequentialWgsSolver.create>[1]) => (
+        WebGpuSequentialWgsSolver.create(solverCalibration, solverConfig)
+      ),
+    } : {}),
   });
   const sourceFrames = await Promise.resolve(compiled.slmFrameStore.toArray());
   const slmFrames = sourceFrames.map(copySlmFrame);
@@ -102,9 +122,10 @@ async function compileSequence(jobId: number, input: SequenceWorkerInput): Promi
   scope.postMessage(response, slmFrames.map((frame) => frame.buffer));
 }
 
-function generateTweezerFrame(jobId: number, input: TweezerFrameWorkerInput): void {
+async function generateTweezerFrame(jobId: number, input: TweezerFrameWorkerInput): Promise<void> {
   const started = performance.now();
-  const solver = new SequentialWgsSolver(tweezerCalibration(input), {
+  const calibration = tweezerCalibration(input);
+  const config = {
     width: input.fftWidth,
     height: input.fftHeight,
     format: "UINT8",
@@ -115,19 +136,27 @@ function generateTweezerFrame(jobId: number, input: TweezerFrameWorkerInput): vo
     backgroundPolicy: "ZERO",
     requireConvergence: false,
     measureSolveTime: true,
-  });
-  const result = solver.solveSequentialFrame(opticalTweezersToFrame(input.tweezers));
-  const frame = copySlmFrame(result.pixels);
-  const response: CompilerWorkerResponse = {
-    kind: "TWEEZER_FRAME_RESULT",
-    jobId,
-    format: frame.format,
-    buffer: frame.buffer,
-    metrics: result.metrics,
-    elapsedMs: performance.now() - started,
-    checksum: crc32(bytesFor(result.pixels)),
-  };
-  scope.postMessage(response, [frame.buffer]);
+  } as const;
+  const solver: SequentialHologramBackend = input.backend === "webgpu"
+    ? await WebGpuSequentialWgsSolver.create(calibration, config)
+    : new SequentialWgsSolver(calibration, config);
+  try {
+    const result = await solver.solveSequentialFrame(opticalTweezersToFrame(input.tweezers));
+    const frame = copySlmFrame(result.pixels);
+    const response: CompilerWorkerResponse = {
+      kind: "TWEEZER_FRAME_RESULT",
+      jobId,
+      format: frame.format,
+      buffer: frame.buffer,
+      metrics: result.metrics,
+      elapsedMs: performance.now() - started,
+      checksum: crc32(bytesFor(result.pixels)),
+      backendId: solver.backendId,
+    };
+    scope.postMessage(response, [frame.buffer]);
+  } finally {
+    await solver.dispose?.();
+  }
 }
 
 function sequenceCalibration(input: SequenceWorkerInput): CalibrationPackage {

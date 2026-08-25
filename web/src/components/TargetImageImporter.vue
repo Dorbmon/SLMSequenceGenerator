@@ -15,11 +15,15 @@ import type {
 interface ImportedTargetPoint {
   xUm: number;
   yUm: number;
+  relativeIntensity: number;
 }
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   disabled: boolean;
-}>();
+  destination?: "targets" | "tweezers";
+}>(), {
+  destination: "targets",
+});
 
 const emit = defineEmits<{
   apply: [points: ImportedTargetPoint[], complete: (accepted: boolean) => void];
@@ -77,6 +81,17 @@ const pointSummary = computed(() => {
 const discardedSummary = computed(() => {
   const discarded = discardedSmall.value + discardedLarge.value + discardedByLimit.value;
   return discarded > 0 ? `${discarded} component${discarded === 1 ? "" : "s"} filtered` : "No extra components filtered";
+});
+const destinationCopy = computed(() => props.destination === "tweezers" ? {
+  title: "Extract optical tweezers from an image",
+  description: "Upload a target-field image. Spot centroids become tweezers, and integrated spot brightness seeds their relative intensity.",
+  upload: "Upload tweezer image",
+  applied: "tweezers",
+} : {
+  title: "Extract target sites from an image",
+  description: "Upload a target-field image. Bright or dark connected spots are converted into calibrated point centroids.",
+  upload: "Upload target image",
+  applied: "targets",
 });
 
 function detectionOptions(): SpotDetectionOptions {
@@ -273,19 +288,27 @@ function applyDetectedTargets(): void {
     showError("Image field width and height must be positive numbers");
     return;
   }
-  const points = mapImagePointsToField(
+  const mapped = mapImagePointsToField(
     detections.value,
     analysisWidth.value,
     analysisHeight.value,
     fieldWidthUm.value,
     fieldHeightUm.value,
-  ).map(({ xUm, yUm }) => ({ xUm, yUm }));
+  );
+  const maximumSignal = Math.max(1, ...mapped.map((point) => point.integratedSignal));
+  const points = mapped.map(({ xUm, yUm, integratedSignal }) => ({
+    xUm,
+    yUm,
+    relativeIntensity: Math.max(0.001, integratedSignal / maximumSignal),
+  }));
   emit("apply", points, (accepted) => {
     if (accepted) {
       appliedCount.value = points.length;
       errorMessage.value = "";
     } else {
-      showError("Resolve the coordinate JSON error before replacing target sites");
+      showError(props.destination === "tweezers"
+        ? "Unable to replace optical tweezers while the editor is busy"
+        : "Resolve the coordinate JSON error before replacing target sites");
     }
   });
 }
@@ -345,11 +368,11 @@ defineExpose({ reset });
     <div v-if="!hasImage" class="target-image-empty">
       <div class="image-import-mark" aria-hidden="true"><i></i><i></i><i></i><b>+</b></div>
       <div>
-        <strong>Extract target sites from an image</strong>
-        <p>Upload a target-field image. Bright or dark connected spots are converted into calibrated point centroids.</p>
+        <strong>{{ destinationCopy.title }}</strong>
+        <p>{{ destinationCopy.description }}</p>
       </div>
       <button class="apply-button" type="button" :disabled="disabled || running" @click="upload?.click()">
-        {{ running ? "Decoding image..." : "Upload target image" }}
+        {{ running ? "Decoding image..." : destinationCopy.upload }}
       </button>
       <p v-if="errorMessage" class="target-image-error target-image-load-error" role="alert">{{ errorMessage }}</p>
     </div>
@@ -424,7 +447,7 @@ defineExpose({ reset });
           :disabled="disabled || running || detections.length === 0 || !mappingValid"
           @click="applyDetectedTargets"
         >
-          {{ appliedCount === detections.length ? `${appliedCount} targets applied` : `Replace targets with ${detections.length} points` }}
+          {{ appliedCount === detections.length ? `${appliedCount} ${destinationCopy.applied} applied` : `Replace ${destinationCopy.applied} with ${detections.length} points` }}
         </button>
       </div>
     </div>

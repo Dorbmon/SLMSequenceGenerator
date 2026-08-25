@@ -18,6 +18,7 @@ import type {
   RearrangementRequest,
   SequenceManifest,
   SequenceValidationReport,
+  SequentialHologramBackend,
   SlmFrameDescriptor,
   TrapFrame,
 } from "./types.js";
@@ -101,73 +102,80 @@ export class SlmSequenceCompiler {
     const slmFrameStore = options.outputStore ?? new MemoryFrameStore<Uint8Array | Uint16Array>();
     const frameMetrics: FrameMetrics[] = [];
     const slmFrameDescriptors: SlmFrameDescriptor[] = [];
-    const solver = new SequentialWgsSolver(normalized.calibration, normalized.hologramConfig);
+    const solver: SequentialHologramBackend = await (options.hologramSolverFactory
+      ? options.hologramSolverFactory(normalized.calibration, normalized.hologramConfig)
+      : new SequentialWgsSolver(normalized.calibration, normalized.hologramConfig));
+    const wgsBackend = solver.backendId;
     let byteOffset = 0n;
     let insertedFrames = 0;
     progress({ stage: "SOLVING_SLM_FRAMES", completed: 0, total: trapFrames.length });
-    for (let index = 0; index < trapFrames.length; index += 1) {
-      this.checkAbort(options.signal);
-      const frame = trapFrames[index]!;
-      let solve = solver.solveSequentialFrame(frame);
-      let retry = 0;
-      // Quality failures may be retried with a larger WGS budget, while the
-      // sequential phase/weight state remains anchored to the prior frame.
-      while (!solve.metrics.accepted && retry < 2) {
-        retry += 1;
-        solver.rollbackToPreviousAcceptedFrame();
-        const budget = Math.min(
-          normalized.hologramConfig.maxIterations,
-          Math.max(solve.metrics.iterations + 1, solve.metrics.iterations * 2),
-        );
-        solve = solver.solveSequentialFrame(frame, budget);
-      }
-      if (!solve.metrics.accepted) {
-        if (index > 0 && insertedFrames < normalized.hologramConfig.maxInsertedFrames && trapFrames[index]!.timeUs - trapFrames[index - 1]!.timeUs > 1) {
-          const currentTime = trapFrames[index]!.timeUs;
-          const originalMidpointTime = (trapFrames[index - 1]!.timeUs + trapFrames[index]!.timeUs) / 2;
-          const midpoint = midpointTrapFrame(trapFrames[index - 1]!, trapFrames[index]!, index, finalMotionPlan.trajectories, normalized, originalMidpointTime);
-          midpoint.timeUs = trapFrames[index - 1]!.timeUs + normalized.motionConfig.framePeriodUs;
-          insertTrajectoryMidpoint(finalMotionPlan.trajectories, midpoint, currentTime, normalized.motionConfig.framePeriodUs);
-          finalMotionPlan.makespanUs += normalized.motionConfig.framePeriodUs;
-          const regenerated = sampleTrapFrames(normalized, finalMotionPlan.trajectories);
-          trapFrames.splice(index, trapFrames.length - index, ...regenerated.slice(index));
-          insertedFrames += 1;
-          solver.rollbackToPreviousAcceptedFrame();
-          index -= 1;
-          continue;
+    try {
+      for (let index = 0; index < trapFrames.length; index += 1) {
+        this.checkAbort(options.signal);
+        const frame = trapFrames[index]!;
+        let solve = await solver.solveSequentialFrame(frame);
+        let retry = 0;
+        // Quality failures may be retried with a larger WGS budget, while the
+        // sequential phase/weight state remains anchored to the prior frame.
+        while (!solve.metrics.accepted && retry < 2) {
+          retry += 1;
+          await solver.rollbackToPreviousAcceptedFrame();
+          const budget = Math.min(
+            normalized.hologramConfig.maxIterations,
+            Math.max(solve.metrics.iterations + 1, solve.metrics.iterations * 2),
+          );
+          solve = await solver.solveSequentialFrame(frame, budget);
         }
-        throw compilationFailure("FRAME_QUALITY_REJECTED", `SLM frame ${index} failed quality gates`, [
-          {
-            code: "FRAME_QUALITY_REJECTED",
-            stage: "SOLVING_SLM_FRAMES",
-            message: `Frame ${index} did not pass configured quality gates`,
-            frameIndex: index,
-          },
-        ]);
+        if (!solve.metrics.accepted) {
+          if (index > 0 && insertedFrames < normalized.hologramConfig.maxInsertedFrames && trapFrames[index]!.timeUs - trapFrames[index - 1]!.timeUs > 1) {
+            const currentTime = trapFrames[index]!.timeUs;
+            const originalMidpointTime = (trapFrames[index - 1]!.timeUs + trapFrames[index]!.timeUs) / 2;
+            const midpoint = midpointTrapFrame(trapFrames[index - 1]!, trapFrames[index]!, index, finalMotionPlan.trajectories, normalized, originalMidpointTime);
+            midpoint.timeUs = trapFrames[index - 1]!.timeUs + normalized.motionConfig.framePeriodUs;
+            insertTrajectoryMidpoint(finalMotionPlan.trajectories, midpoint, currentTime, normalized.motionConfig.framePeriodUs);
+            finalMotionPlan.makespanUs += normalized.motionConfig.framePeriodUs;
+            const regenerated = sampleTrapFrames(normalized, finalMotionPlan.trajectories);
+            trapFrames.splice(index, trapFrames.length - index, ...regenerated.slice(index));
+            insertedFrames += 1;
+            await solver.rollbackToPreviousAcceptedFrame();
+            index -= 1;
+            continue;
+          }
+          throw compilationFailure("FRAME_QUALITY_REJECTED", `SLM frame ${index} failed quality gates`, [
+            {
+              code: "FRAME_QUALITY_REJECTED",
+              stage: "SOLVING_SLM_FRAMES",
+              message: `Frame ${index} did not pass configured quality gates`,
+              frameIndex: index,
+            },
+          ]);
+        }
+        try {
+          await trapFrameStore.append(frame);
+          await slmFrameStore.append(solve.pixels);
+        } catch (error) {
+          throw new SlmError("STORAGE_ERROR", `Unable to store SLM frame ${index}`, {
+            stage: "WRITING_OUTPUT",
+            retryable: true,
+            cause: error,
+          });
+        }
+        await solver.commitFrameState();
+        const descriptor = frameDescriptor(
+          frame,
+          solve.pixels,
+          normalized.calibration.manifest.activeWidth,
+          normalized.calibration.manifest.activeHeight,
+          normalized.hologramConfig.format,
+          byteOffset,
+        );
+        byteOffset += BigInt(descriptor.byteLength);
+        slmFrameDescriptors.push(descriptor);
+        frameMetrics.push({ ...solve.metrics, refinementCount: retry });
+        progress({ stage: "SOLVING_SLM_FRAMES", completed: index + 1, total: trapFrames.length, frameIndex: index });
       }
-      try {
-        await trapFrameStore.append(frame);
-        await slmFrameStore.append(solve.pixels);
-      } catch (error) {
-        throw new SlmError("STORAGE_ERROR", `Unable to store SLM frame ${index}`, {
-          stage: "WRITING_OUTPUT",
-          retryable: true,
-          cause: error,
-        });
-      }
-      solver.commitFrameState();
-      const descriptor = frameDescriptor(
-        frame,
-        solve.pixels,
-        normalized.calibration.manifest.activeWidth,
-        normalized.calibration.manifest.activeHeight,
-        normalized.hologramConfig.format,
-        byteOffset,
-      );
-      byteOffset += BigInt(descriptor.byteLength);
-      slmFrameDescriptors.push(descriptor);
-      frameMetrics.push({ ...solve.metrics, refinementCount: retry });
-      progress({ stage: "SOLVING_SLM_FRAMES", completed: index + 1, total: trapFrames.length, frameIndex: index });
+    } finally {
+      await solver.dispose?.();
     }
 
     this.checkAbort(options.signal);
@@ -190,7 +198,7 @@ export class SlmSequenceCompiler {
     }
     progress({ stage: "VALIDATING_SEQUENCE", completed: 1, total: 1 });
     progress({ stage: "WRITING_OUTPUT", completed: 0, total: 1 });
-    const manifest = makeManifest(request, normalized, assignments, finalMotionPlan, trapFrames, slmFrameDescriptors, validation, this.config, assignmentAttempts);
+    const manifest = makeManifest(request, normalized, assignments, finalMotionPlan, trapFrames, slmFrameDescriptors, validation, this.config, assignmentAttempts, wgsBackend);
     progress({ stage: "WRITING_OUTPUT", completed: 1, total: 1 });
     return {
       manifest,
@@ -383,6 +391,7 @@ function makeManifest(
   validation: SequenceValidationReport,
   compilerConfig: CompilerConfig,
   assignmentAttempts: number,
+  wgsBackend: string,
 ): SequenceManifest {
   return {
     formatVersion: "1.1",
@@ -407,7 +416,7 @@ function makeManifest(
       waitCount: motionPlan.waitCount,
       detourCount: motionPlan.detourCount,
     },
-    wgsBackend: "wasm-fft-phase-locked-wgs",
+    wgsBackend,
     wgsParameters: {
       targetPhaseMode: normalized.hologramConfig.targetPhaseMode,
       firstFrameIterations: normalized.hologramConfig.firstFrameIterations,

@@ -6,6 +6,8 @@ import {
 } from "../../../src/index.js";
 import ComputationActivity from "../components/ComputationActivity.vue";
 import SlmFramePreview from "../components/SlmFramePreview.vue";
+import TargetImageImporter from "../components/TargetImageImporter.vue";
+import { encodeGrayscaleBmp } from "../lib/bmp.js";
 import {
   DEFAULT_SLM_HEIGHT,
   DEFAULT_SLM_WIDTH,
@@ -25,18 +27,30 @@ import {
 import type {
   CompilerWorkerRequest,
   CompilerWorkerResponse,
+  ComputeBackend,
 } from "../workers/compiler-messages.js";
 
 type JsonStatus = "synced" | "dirty" | "invalid";
 type OutputState = "idle" | "running" | "accepted" | "rejected" | "cancelled";
 
+interface TargetImageImporterHandle {
+  reset(): void;
+}
+
+const props = defineProps<{
+  webgpuAvailable: boolean;
+  webgpuStatus: string;
+}>();
+
 const upload = ref<HTMLInputElement | null>(null);
+const targetImageImporter = ref<TargetImageImporterHandle | null>(null);
 const tweezers = ref<OpticalTweezerInput[]>(cloneOpticalTweezers(DEFAULT_OPTICAL_TWEEZERS));
 const jsonDraft = ref(serializeOpticalTweezers(tweezers.value));
 const jsonStatus = ref<JsonStatus>("synced");
 const slmWidth = ref(DEFAULT_SLM_WIDTH);
 const slmHeight = ref(DEFAULT_SLM_HEIGHT);
 const iterations = ref(4);
+const computeBackend = ref<ComputeBackend>("wasm");
 const running = ref(false);
 const outputState = ref<OutputState>("idle");
 const outputPixels = shallowRef<Uint8Array | Uint16Array | null>(null);
@@ -44,6 +58,7 @@ const metrics = shallowRef<FrameMetrics | null>(null);
 const elapsedMs = ref<number | null>(null);
 const errorMessage = ref("");
 const checksum = ref<number | null>(null);
+const resultBackendId = ref("wasm-fft-phase-locked-wgs");
 let suppressTableSync = false;
 let generation = 0;
 let frameWorker: Worker | null = null;
@@ -53,7 +68,7 @@ let calculationStarted = 0;
 const fftWidth = computed(() => fftDimensionFor(slmWidth.value));
 const fftHeight = computed(() => fftDimensionFor(slmHeight.value));
 const phaseStatus = computed(() => {
-  if (running.value) return "SOLVING / WASM WGS";
+  if (running.value) return computeBackend.value === "webgpu" ? "SOLVING / WEBGPU WGS" : "SOLVING / WASM WGS";
   if (outputState.value === "accepted") return "FRAME ACCEPTED";
   if (outputState.value === "rejected") return "GENERATION REJECTED";
   if (outputState.value === "cancelled") return "GENERATION CANCELLED";
@@ -73,6 +88,13 @@ watch(tweezers, () => {
   jsonStatus.value = "synced";
   invalidateOutput();
 }, { deep: true });
+
+watch(() => props.webgpuAvailable, (available) => {
+  if (!available && computeBackend.value === "webgpu") {
+    computeBackend.value = "wasm";
+    invalidateOutput();
+  }
+});
 
 function finiteOrZero(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
@@ -141,6 +163,29 @@ function removeTweezer(index: number): void {
   tweezers.value.splice(index, 1);
 }
 
+function applyImageTweezers(
+  points: readonly { xUm: number; yUm: number; relativeIntensity: number }[],
+  complete: (accepted: boolean) => void,
+): void {
+  if (running.value || points.length === 0) {
+    complete(false);
+    return;
+  }
+  suppressTableSync = true;
+  tweezers.value = points.map((point, index) => ({
+    trapId: index + 1,
+    xUm: point.xUm,
+    yUm: point.yUm,
+    phaseRad: 0,
+    intensity: Math.max(0.001, point.relativeIntensity),
+  }));
+  jsonDraft.value = serializeOpticalTweezers(tweezers.value);
+  jsonStatus.value = "synced";
+  invalidateOutput();
+  nextTick(() => { suppressTableSync = false; });
+  complete(true);
+}
+
 function reset(): void {
   generation += 1;
   terminateFrameWorker();
@@ -152,14 +197,19 @@ function reset(): void {
   slmWidth.value = DEFAULT_SLM_WIDTH;
   slmHeight.value = DEFAULT_SLM_HEIGHT;
   iterations.value = 4;
+  computeBackend.value = "wasm";
   running.value = false;
   outputState.value = "idle";
   outputPixels.value = null;
   metrics.value = null;
   elapsedMs.value = null;
   checksum.value = null;
+  resultBackendId.value = "wasm-fft-phase-locked-wgs";
   errorMessage.value = "";
-  nextTick(() => { suppressTableSync = false; });
+  nextTick(() => {
+    suppressTableSync = false;
+    targetImageImporter.value?.reset();
+  });
 }
 
 function updateDimension(event: Event, dimension: "width" | "height"): void {
@@ -183,6 +233,13 @@ function updateDimension(event: Event, dimension: "width" | "height"): void {
 
 function updateIterations(event: Event): void {
   iterations.value = Number((event.target as HTMLInputElement).value);
+  invalidateOutput();
+}
+
+function updateComputeBackend(event: Event): void {
+  const value = (event.target as HTMLSelectElement).value as ComputeBackend;
+  if (value === "webgpu" && !props.webgpuAvailable) return;
+  computeBackend.value = value;
   invalidateOutput();
 }
 
@@ -237,6 +294,7 @@ function generateFrame(): void {
     metrics.value = response.metrics;
     elapsedMs.value = response.elapsedMs;
     checksum.value = response.checksum;
+    resultBackendId.value = response.backendId;
     outputState.value = response.metrics.accepted ? "accepted" : "rejected";
     if (!response.metrics.accepted) errorMessage.value = "The generated frame did not pass the numerical quality checks";
     running.value = false;
@@ -257,6 +315,7 @@ function generateFrame(): void {
       fftWidth: fftWidth.value,
       fftHeight: fftHeight.value,
       iterations: iterations.value,
+      backend: computeBackend.value,
     },
   };
   worker.postMessage(request);
@@ -331,32 +390,13 @@ function exportRawFrame(): void {
   );
 }
 
-function frameImageData(): ImageData | null {
-  const pixels = outputPixels.value;
-  if (!pixels) return null;
-  const image = new ImageData(slmWidth.value, slmHeight.value);
-  const divisor = pixels instanceof Uint16Array ? 257 : 1;
-  for (let index = 0; index < pixels.length; index += 1) {
-    const value = Math.round(pixels[index]! / divisor);
-    const offset = index * 4;
-    image.data[offset] = value;
-    image.data[offset + 1] = value;
-    image.data[offset + 2] = value;
-    image.data[offset + 3] = 255;
-  }
-  return image;
-}
-
-function exportPng(): void {
-  const image = frameImageData();
-  if (!image) return;
-  const canvas = document.createElement("canvas");
-  canvas.width = image.width;
-  canvas.height = image.height;
-  canvas.getContext("2d")?.putImageData(image, 0, 0);
-  canvas.toBlob((blob) => {
-    if (blob) download(blob, `slm-frame-${slmWidth.value}x${slmHeight.value}.png`);
-  }, "image/png");
+function exportBmp(): void {
+  if (!outputPixels.value) return;
+  const bmp = encodeGrayscaleBmp(outputPixels.value, slmWidth.value, slmHeight.value);
+  download(
+    new Blob([bmp.buffer as ArrayBuffer], { type: "image/bmp" }),
+    `slm-frame-${slmWidth.value}x${slmHeight.value}.bmp`,
+  );
 }
 
 function exportMetadata(): void {
@@ -375,7 +415,7 @@ function exportMetadata(): void {
     },
     fftGrid: { width: fftWidth.value, height: fftHeight.value },
     solver: {
-      backend: "wasm-fft-phase-locked-wgs",
+      backend: resultBackendId.value,
       requestedIterations: iterations.value,
       backgroundPolicy: "ZERO",
       elapsedMs: elapsedMs.value,
@@ -466,6 +506,17 @@ defineExpose({ reset });
           <div class="tweezer-plane-caption"><span>PHASE / HUE</span><span>UM PLANE / TOP VIEW</span></div>
         </div>
 
+        <div class="data-subbar target-image-subbar tweezer-image-subbar">
+          <span>IMAGE INPUT / OPTICAL TWEEZERS</span>
+          <span>SPOT POWER → RELATIVE INTENSITY / PHASE 0</span>
+        </div>
+        <TargetImageImporter
+          ref="targetImageImporter"
+          destination="tweezers"
+          :disabled="running"
+          @apply="applyImageTweezers"
+        />
+
         <div class="tweezer-table-wrap">
           <table class="tweezer-table">
             <thead><tr><th>ID</th><th>X / UM</th><th>Y / UM</th><th>PHASE / RAD</th><th>INTENSITY</th><th></th></tr></thead>
@@ -526,6 +577,13 @@ defineExpose({ reset });
               <p class="resolution-note">FFT COMPUTE GRID {{ fftWidth }} &times; {{ fftHeight }} / POWER-OF-TWO PADDED</p>
               <p class="tweezer-calibration-note">SIMULATION CALIBRATION / LINEAR 0–2π PHASE RESPONSE</p>
             </div>
+            <label class="tweezer-backend-choice">COMPUTE BACKEND
+              <select :value="computeBackend" :disabled="running" @change="updateComputeBackend">
+                <option value="wasm">WebAssembly / CPU FFT</option>
+                <option value="webgpu" :disabled="!webgpuAvailable">WebGPU / GPU-resident WGS</option>
+              </select>
+              <small :class="{ 'is-available': webgpuAvailable }">{{ webgpuStatus }}</small>
+            </label>
             <div class="control-block">
               <div class="control-label"><span>WGS ITERATIONS</span><output>{{ String(iterations).padStart(2, "0") }} / FRAME</output></div>
               <input type="range" min="1" max="12" step="1" :value="iterations" :disabled="running" @input="updateIterations">
@@ -543,7 +601,7 @@ defineExpose({ reset });
             </button>
             <div class="tweezer-export-actions">
               <button type="button" :disabled="!outputPixels || running" @click="exportRawFrame">Raw frame <b>&darr;</b></button>
-              <button type="button" :disabled="!outputPixels || running" @click="exportPng">PNG preview <b>&darr;</b></button>
+              <button type="button" :disabled="!outputPixels || running" @click="exportBmp">BMP frame <b>&darr;</b></button>
               <button type="button" :disabled="!outputPixels || running" @click="exportMetadata">Metadata <b>&darr;</b></button>
             </div>
           </div>

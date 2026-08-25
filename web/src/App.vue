@@ -23,6 +23,7 @@ import {
 import type {
   CompilerWorkerRequest,
   CompilerWorkerResponse,
+  ComputeBackend,
   SerializedSequence,
 } from "./workers/compiler-messages.js";
 
@@ -57,6 +58,9 @@ const iterations = ref(4);
 const slmWidth = ref(DEFAULT_SLM_WIDTH);
 const slmHeight = ref(DEFAULT_SLM_HEIGHT);
 const phaseMode = ref("Phase locked WGS");
+const computeBackend = ref<ComputeBackend>("wasm");
+const webgpuAvailable = ref(false);
+const webgpuStatus = ref("CHECKING WEBGPU IN WORKER…");
 const running = ref(false);
 const compileElapsedMs = ref(0);
 const compileProgress = ref<number | null>(null);
@@ -67,6 +71,7 @@ const logs = ref<LogLine[]>(defaultLogs());
 let playbackFrame = 0;
 let compileGeneration = 0;
 let compilationWorker: Worker | null = null;
+let capabilityWorker: Worker | null = null;
 let compileTimer = 0;
 let compileStarted = 0;
 
@@ -178,6 +183,38 @@ function updatePhaseMode(value: string): void {
   invalidateSequence();
 }
 
+function updateComputeBackend(value: ComputeBackend): void {
+  if (value === "webgpu" && !webgpuAvailable.value) return;
+  computeBackend.value = value;
+  invalidateSequence(value === "webgpu" ? "WebGPU backend selected" : "WebAssembly backend selected");
+}
+
+function inspectGpuCapability(): void {
+  capabilityWorker?.terminate();
+  const worker = new Worker(new URL("./workers/compiler.worker.ts", import.meta.url), { type: "module" });
+  capabilityWorker = worker;
+  worker.onmessage = (event: MessageEvent<CompilerWorkerResponse>) => {
+    const response = event.data;
+    if (worker !== capabilityWorker || response.kind !== "WEBGPU_CAPABILITY") return;
+    webgpuAvailable.value = response.available;
+    webgpuStatus.value = response.available
+      ? `AVAILABLE${response.adapter ? ` / ${response.adapter}` : ""} / FIELD STAYS ON GPU`
+      : `UNAVAILABLE / ${response.reason}`;
+    if (!response.available && computeBackend.value === "webgpu") computeBackend.value = "wasm";
+    worker.terminate();
+    if (capabilityWorker === worker) capabilityWorker = null;
+  };
+  worker.onerror = (event: ErrorEvent) => {
+    if (worker !== capabilityWorker) return;
+    webgpuAvailable.value = false;
+    webgpuStatus.value = `UNAVAILABLE / ${event.message || "CAPABILITY WORKER FAILED"}`;
+    worker.terminate();
+    capabilityWorker = null;
+  };
+  const request: CompilerWorkerRequest = { kind: "CHECK_WEBGPU", jobId: 0 };
+  worker.postMessage(request);
+}
+
 function updateCompileLog(progress: CompileProgress): void {
   const labels: Record<CompileProgress["stage"], string> = {
     VALIDATING: "VALIDATING INPUT",
@@ -259,6 +296,7 @@ function compileSequence(): void {
       fftWidth: fftWidth.value,
       fftHeight: fftHeight.value,
       targetPhaseMode: phaseMode.value === "Soft phase locked" ? "SOFT_PHASE_LOCKED_WGS" : "PHASE_LOCKED_WGS",
+      backend: computeBackend.value,
     },
   };
   worker.postMessage(request);
@@ -424,6 +462,7 @@ function reset(): void {
   slmWidth.value = DEFAULT_SLM_WIDTH;
   slmHeight.value = DEFAULT_SLM_HEIGHT;
   phaseMode.value = "Phase locked WGS";
+  computeBackend.value = "wasm";
   inputError.value = "";
   sequence.value = null;
   frames.value = [];
@@ -462,11 +501,14 @@ function handlePopState(): void {
 onMounted(() => {
   window.addEventListener("popstate", handlePopState);
   document.title = isTweezerPage.value ? "Optical Tweezer Frame | SLM Compiler" : "SLM Sequence Compiler";
+  inspectGpuCapability();
 });
 
 onBeforeUnmount(() => {
   compileGeneration += 1;
   terminateCompilationWorker();
+  capabilityWorker?.terminate();
+  capabilityWorker = null;
   stopCompileClock();
   stopPlayback();
   window.removeEventListener("popstate", handlePopState);
@@ -484,7 +526,7 @@ onBeforeUnmount(() => {
         <a href="/" :class="{ 'is-active': !isTweezerPage }" :aria-current="!isTweezerPage ? 'page' : undefined" @click="navigate($event, '/')">Sequence</a>
         <a href="/tweezers" :class="{ 'is-active': isTweezerPage }" :aria-current="isTweezerPage ? 'page' : undefined" @click="navigate($event, '/tweezers')">Tweezer frame</a>
       </nav>
-      <div class="topbar-status"><span class="status-dot"></span> READY / WASM CORE</div>
+      <div class="topbar-status"><span class="status-dot"></span> READY / WASM + {{ webgpuAvailable ? "WEBGPU" : "CPU" }}</div>
       <button class="reset-button" type="button" @click="resetActivePage">Reset</button>
     </header>
 
@@ -516,6 +558,9 @@ onBeforeUnmount(() => {
           :fft-width="fftWidth"
           :fft-height="fftHeight"
           :phase-mode="phaseMode"
+          :compute-backend="computeBackend"
+          :webgpu-available="webgpuAvailable"
+          :webgpu-status="webgpuStatus"
           :badge="badge"
           :running="running"
           :elapsed-ms="compileElapsedMs"
@@ -528,6 +573,7 @@ onBeforeUnmount(() => {
           @update:slm-width="updateSlmWidth"
           @update:slm-height="updateSlmHeight"
           @update:phase-mode="updatePhaseMode"
+          @update:compute-backend="updateComputeBackend"
           @compile="compileSequence"
           @cancel="cancelCompilation"
           @step="stepFrame"
@@ -553,6 +599,11 @@ onBeforeUnmount(() => {
         <div><small>ASSIGNMENT COST</small><strong>{{ metricCost }}</strong></div>
       </div>
     </section>
-    <OpticalTweezersPage v-show="isTweezerPage" ref="opticalTweezersPage" />
+    <OpticalTweezersPage
+      v-show="isTweezerPage"
+      ref="opticalTweezersPage"
+      :webgpu-available="webgpuAvailable"
+      :webgpu-status="webgpuStatus"
+    />
   </main>
 </template>

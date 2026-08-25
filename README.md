@@ -51,13 +51,23 @@ replace the target JSON.
 
 The `/tweezers` workspace generates a single SLM frame directly from optical
 tweezer coordinates, requested phases, and relative intensities. Inputs can be
-edited in the table or as JSON, and the resulting 8-bit frame can be downloaded
-as raw pixels, a PNG preview, or with its JSON metadata.
+edited in the table or as JSON. It also accepts target-field images: detected
+spot centroids become tweezer coordinates, integrated spot power seeds relative
+intensity, and imported phases start at zero for subsequent editing. The
+resulting 8-bit frame can be downloaded as raw pixels, a standards-compatible
+grayscale BMP, or with its JSON metadata.
 
 Browser calculations run in a dedicated Web Worker. The interface, progress
 animations, navigation, and elapsed-time display remain responsive while Wasm
 is solving, and either sequence compilation or single-frame generation can be
 cancelled immediately.
+
+Both workspaces expose a compute-backend selector. The compatibility path uses
+the Rust/WebAssembly FFT core. On supported browsers, the WebGPU path keeps the
+phase field, radix-2 FFT intermediates, WGS weights, phase constraints,
+quantization, and accepted sequential state in GPU buffers across iterations;
+only the final cropped frame and compact metrics are read back. WebGPU support
+is checked inside the same dedicated worker that performs the computation.
 
 SLM output defaults to 1272×1024 pixels. Width and height can be changed from
 the compiler controls before a run; exported frame dimensions follow those

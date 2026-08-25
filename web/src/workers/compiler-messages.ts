@@ -12,6 +12,8 @@ import type {
 } from "../../../src/types.js";
 import type { OpticalTweezerInput } from "../lib/tweezers.js";
 
+export type ComputeBackend = "wasm" | "webgpu";
+
 export interface SequenceWorkerInput {
   initialAtoms: InitialAtom[];
   targetSites: TargetSite[];
@@ -22,6 +24,7 @@ export interface SequenceWorkerInput {
   fftWidth: number;
   fftHeight: number;
   targetPhaseMode: "PHASE_LOCKED_WGS" | "SOFT_PHASE_LOCKED_WGS";
+  backend: ComputeBackend;
 }
 
 export interface TweezerFrameWorkerInput {
@@ -31,9 +34,11 @@ export interface TweezerFrameWorkerInput {
   fftWidth: number;
   fftHeight: number;
   iterations: number;
+  backend: ComputeBackend;
 }
 
 export type CompilerWorkerRequest =
+  | { kind: "CHECK_WEBGPU"; jobId: number }
   | { kind: "COMPILE_SEQUENCE"; jobId: number; input: SequenceWorkerInput }
   | { kind: "GENERATE_TWEEZER_FRAME"; jobId: number; input: TweezerFrameWorkerInput };
 
@@ -54,6 +59,7 @@ export interface SerializedSequence {
 }
 
 export type CompilerWorkerResponse =
+  | { kind: "WEBGPU_CAPABILITY"; jobId: number; available: boolean; reason: string; adapter?: string }
   | { kind: "SEQUENCE_PROGRESS"; jobId: number; progress: CompileProgress }
   | { kind: "SEQUENCE_RESULT"; jobId: number; sequence: SerializedSequence; elapsedMs: number }
   | {
@@ -64,5 +70,6 @@ export type CompilerWorkerResponse =
       metrics: FrameMetrics;
       elapsedMs: number;
       checksum: number;
+      backendId: string;
     }
   | { kind: "WORKER_ERROR"; jobId: number; message: string; name: string; stack?: string };

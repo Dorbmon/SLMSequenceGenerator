@@ -127,6 +127,39 @@ test("crops a padded FFT grid to the active SLM resolution", async () => {
   assert.equal(verifySequencePackage(sequence).valid, true);
 });
 
+test("awaits an injected hologram backend and records its identity", async () => {
+  const compiler = await SlmSequenceCompiler.create(compilerOptions());
+  let disposed = false;
+  const sequence = await compiler.compileRearrangement({
+    initialAtoms: [{ atomId: 1, xUm: 0, yUm: 0 }],
+    targetSites: [{ siteId: 2, xUm: 0, yUm: 0 }],
+    calibrationId: "test-calibration",
+  }, {
+    hologramSolverFactory(solverCalibration, solverConfig) {
+      const cpu = new SequentialWgsSolver(solverCalibration, solverConfig);
+      return {
+        backendId: "test-async-backend",
+        async solveSequentialFrame(frame, budget) {
+          await Promise.resolve();
+          return cpu.solveSequentialFrame(frame, budget);
+        },
+        async commitFrameState() {
+          cpu.commitFrameState();
+        },
+        async rollbackToPreviousAcceptedFrame() {
+          cpu.rollbackToPreviousAcceptedFrame();
+        },
+        async dispose() {
+          disposed = true;
+        },
+      };
+    },
+  });
+  assert.equal(sequence.manifest.wgsBackend, "test-async-backend");
+  assert.equal(disposed, true);
+  assert.equal(sequence.validation.accepted, true);
+});
+
 test("generates a direct phase-locked optical tweezer frame", () => {
   const solver = new SequentialWgsSolver(calibration(), {
     width: 16,
