@@ -317,6 +317,9 @@ export interface FrameMetrics {
   timeUs: number;
   iterations: number;
   converged: boolean;
+  maximumRelativeAmplitudeError: number;
+  amplitudeConvergenceTolerance: number;
+  phaseConvergenceToleranceRad: number;
   targetIntensityMean: number;
   targetIntensityStd: number;
   targetIntensityCoefficientOfVariation: number;

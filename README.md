@@ -80,13 +80,18 @@ is solving, and either sequence compilation or single-frame generation can be
 cancelled immediately.
 
 Both workspaces expose a compute-backend selector. Wasm and WebGPU use the same
-trap-domain WGS model: every iteration evaluates the unnormalised discrete
-Fourier sum exactly at each requested, potentially fractional trap coordinate,
-updates the trap weights, and synthesizes the SLM phase with the exact adjoint
-sum. No bilinear FFT-bin sampling or scattering is used. The WebGPU path keeps
-that entire iterative process, quantization, and accepted sequential state in
-GPU buffers. A full radix-2 FFT is run only after quantization for full-plane
-power and ghost diagnostics, followed by one cropped-frame/metrics readback.
+trap-domain WGS model. It evaluates the unnormalised discrete Fourier sum
+exactly at each requested, potentially fractional trap coordinate; a measured
+phase-precompensation stage separates requested output phases from the internal
+synthesis phasors, and damped feedback then balances amplitudes before exact
+adjoint synthesis. Candidate
+quality is measured after display-code quantization and LUT decoding, and the
+best certified candidate is retained so a larger iteration budget cannot return
+a worse frame. No bilinear FFT-bin sampling or scattering is used. The WebGPU
+path keeps that entire iterative process, best-candidate state, quantization,
+and accepted sequential state in GPU buffers. A full radix-2 FFT is run only
+after quantization for full-plane power and ghost diagnostics, followed by one
+cropped-frame/metrics readback.
 WebGPU support is checked inside the same dedicated worker that performs the
 computation. Both backends use the same range-reduced, seeded initialization
 when target phasors destructively cancel. Frames that exhaust their WGS budget
@@ -104,11 +109,12 @@ with `npm run dev`, create the production site in `web-dist/` with
 Cloudflare Workers static-assets deployment uses the same `web-dist/` output via
 `npm run deploy`.
 
-The regression suite includes an artifact-boundary oracle: it solves an
-off-grid trap, exports and decodes the indexed grayscale BMP, then independently
-evaluates that decoded phase frame with a direct complex Fourier sum. This
-guards against a backend appearing converged under its own sampling
-approximation while emitting an optically different frame.
+The regression suite includes artifact-boundary oracles for an off-grid trap
+and the default four-trap phase-locked target. They export and decode the indexed
+grayscale BMP, then independently evaluate that decoded phase frame with a
+direct complex Fourier sum. This guards against a backend appearing converged
+under its own sampling approximation while emitting an optically different
+frame.
 
 Measured runs must provide a calibration package with a phase-response or
 inverse phase LUT. Set `simulationMode: true` only for the synthetic identity

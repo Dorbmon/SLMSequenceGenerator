@@ -11,6 +11,9 @@ import {
   type TrapFrame,
   type TrapState,
   WGS_INITIALIZATION_CANCELLATION_RATIO,
+  WGS_LOCKED_PHASE_PRECOMPENSATION_GAIN,
+  WGS_MAX_STABLE_TRAP_AMPLITUDE_GAIN,
+  WGS_SOFT_PHASE_PRECOMPENSATION_GAIN,
   wrapPhase,
 } from "../../../src/index.js";
 
@@ -32,10 +35,15 @@ const INVERSE_LUT_SIZE = 4096;
 
 type GeneralPipelineName =
   | "initialize_targets"
+  | "initialize_optimizer"
   | "initialize_phase"
-  | "make_field"
   | "sample_targets"
-  | "update_weights"
+  | "evaluate_candidate"
+  | "save_best_phase_codes"
+  | "save_best_targets"
+  | "restore_best_phase_codes"
+  | "restore_best_targets"
+  | "update_controls"
   | "synthesize_phase"
   | "clear_support"
   | "mark_support"
@@ -153,9 +161,11 @@ export class WebGpuSequentialWgsSolver implements SequentialHologramBackend {
       frameParams: device.createBuffer({ label: "WGS frame parameters", size: 96, usage: GPUBufferUsage.UNIFORM | copyDestination }),
       targetInput: device.createBuffer({ label: "WGS target inputs", size: targetBytes, usage: storage | copySource | copyDestination }),
       targetState: device.createBuffer({ label: "WGS target state", size: targetBytes, usage: storage | copySource | copyDestination }),
+      bestTargetState: device.createBuffer({ label: "WGS best target state", size: targetBytes, usage: storage }),
       acceptedTargetInput: device.createBuffer({ label: "WGS accepted target inputs", size: targetBytes, usage: storage | copySource | copyDestination }),
       acceptedTargetState: device.createBuffer({ label: "WGS accepted target state", size: targetBytes, usage: storage | copySource | copyDestination }),
       phase: device.createBuffer({ label: "WGS phase", size: scalarBytes, usage: storage | copySource | copyDestination }),
+      bestPhase: device.createBuffer({ label: "WGS best phase", size: scalarBytes, usage: storage }),
       acceptedPhase: device.createBuffer({ label: "WGS accepted phase", size: scalarBytes, usage: storage | copySource | copyDestination }),
       amplitude: device.createBuffer({ label: "WGS incident amplitude", size: scalarBytes, usage: storage | copyDestination }),
       field: device.createBuffer({ label: "WGS Fourier field", size: complexBytes, usage: storage }),
@@ -163,7 +173,9 @@ export class WebGpuSequentialWgsSolver implements SequentialHologramBackend {
       inverseLut: device.createBuffer({ label: "WGS inverse phase LUT", size: INVERSE_LUT_SIZE * 4, usage: storage | copyDestination }),
       decodeLut: device.createBuffer({ label: "WGS phase response LUT", size: (this.config.format === "UINT8" ? 256 : 65536) * 4, usage: storage | copyDestination }),
       codes: device.createBuffer({ label: "WGS display codes", size: scalarBytes, usage: storage | copySource | copyDestination }),
+      bestCodes: device.createBuffer({ label: "WGS best display codes", size: scalarBytes, usage: storage }),
       acceptedCodes: device.createBuffer({ label: "WGS accepted display codes", size: scalarBytes, usage: storage | copyDestination }),
+      optimizer: device.createBuffer({ label: "WGS optimizer state", size: 32, usage: storage | copySource }),
       partialMetrics: device.createBuffer({ label: "WGS metric partials", size: this.partialCount * 16, usage: storage }),
       summary: device.createBuffer({ label: "WGS metric summary", size: 16, usage: storage | copySource }),
       packed: device.createBuffer({ label: "WGS packed active frame", size: this.packedByteLength, usage: storage | copySource }),
@@ -228,14 +240,26 @@ export class WebGpuSequentialWgsSolver implements SequentialHologramBackend {
 
     const encoder = this.device.createCommandEncoder({ label: `WGS frame ${frame.frameIndex}` });
     this.dispatch(encoder, "initialize_targets", targetCount, TARGET_WORKGROUP_SIZE);
+    this.dispatch(encoder, "initialize_optimizer", 1, 1);
     this.dispatch(encoder, "initialize_phase", this.pixelCount);
-    for (let iteration = 0; iteration < iterations; iteration += 1) {
-      this.dispatch(encoder, "make_field", this.pixelCount);
-      this.dispatch(encoder, "sample_targets", targetCount * EXACT_TARGET_WORKGROUP_SIZE, EXACT_TARGET_WORKGROUP_SIZE);
-      this.dispatch(encoder, "update_weights", 1, 1);
-      this.dispatch(encoder, "synthesize_phase", this.pixelCount);
-    }
     this.dispatch(encoder, "quantize_codes", this.pixelCount);
+    this.dispatch(encoder, "make_final_field", this.pixelCount);
+    this.dispatch(encoder, "sample_targets", targetCount * EXACT_TARGET_WORKGROUP_SIZE, EXACT_TARGET_WORKGROUP_SIZE);
+    this.dispatch(encoder, "evaluate_candidate", 1, 1);
+    this.dispatch(encoder, "save_best_phase_codes", this.pixelCount);
+    this.dispatch(encoder, "save_best_targets", targetCount, TARGET_WORKGROUP_SIZE);
+    for (let iteration = 0; iteration < iterations; iteration += 1) {
+      this.dispatch(encoder, "update_controls", 1, 1);
+      this.dispatch(encoder, "synthesize_phase", this.pixelCount);
+      this.dispatch(encoder, "quantize_codes", this.pixelCount);
+      this.dispatch(encoder, "make_final_field", this.pixelCount);
+      this.dispatch(encoder, "sample_targets", targetCount * EXACT_TARGET_WORKGROUP_SIZE, EXACT_TARGET_WORKGROUP_SIZE);
+      this.dispatch(encoder, "evaluate_candidate", 1, 1);
+      this.dispatch(encoder, "save_best_phase_codes", this.pixelCount);
+      this.dispatch(encoder, "save_best_targets", targetCount, TARGET_WORKGROUP_SIZE);
+    }
+    this.dispatch(encoder, "restore_best_phase_codes", this.pixelCount);
+    this.dispatch(encoder, "restore_best_targets", targetCount, TARGET_WORKGROUP_SIZE);
     this.dispatch(encoder, "make_final_field", this.pixelCount);
     this.dispatch(encoder, "sample_targets", targetCount * EXACT_TARGET_WORKGROUP_SIZE, EXACT_TARGET_WORKGROUP_SIZE);
     this.dispatch(encoder, "clear_support", this.pixelCount);
@@ -249,7 +273,8 @@ export class WebGpuSequentialWgsSolver implements SequentialHologramBackend {
     const targetStateBytes = targetCount * TARGET_STRIDE;
     const stateOffset = this.packedByteLength;
     const summaryOffset = alignTo(stateOffset + targetStateBytes, 4);
-    const readbackSize = summaryOffset + 16;
+    const optimizerOffset = summaryOffset + 16;
+    const readbackSize = optimizerOffset + 32;
     const readback = this.device.createBuffer({
       label: `WGS frame ${frame.frameIndex} readback`,
       size: readbackSize,
@@ -260,6 +285,7 @@ export class WebGpuSequentialWgsSolver implements SequentialHologramBackend {
       encoder.copyBufferToBuffer(this.buffers.targetState!, 0, readback, stateOffset, targetStateBytes);
     }
     encoder.copyBufferToBuffer(this.buffers.summary!, 0, readback, summaryOffset, 16);
+    encoder.copyBufferToBuffer(this.buffers.optimizer!, 0, readback, optimizerOffset, 32);
     this.device.queue.submit([encoder.finish()]);
 
     try {
@@ -277,13 +303,15 @@ export class WebGpuSequentialWgsSolver implements SequentialHologramBackend {
       const totalPower = summary.getFloat32(0, true);
       const maximumGhostIntensity = targetCount === 0 ? 0 : summary.getFloat32(4, true);
       const displayCodeChange = this.accepted ? summary.getFloat32(8, true) : 0;
+      const optimizer = new DataView(snapshot, optimizerOffset, 32);
+      const performedIterations = Math.max(1, optimizer.getUint32(20, true));
       const metrics = this.evaluateMetrics(
         frame,
         targetStates,
         totalPower,
         maximumGhostIntensity,
         displayCodeChange,
-        iterations,
+        performedIterations,
         started,
       );
       this.candidate = {
@@ -341,10 +369,15 @@ export class WebGpuSequentialWgsSolver implements SequentialHologramBackend {
     const module = this.device.createShaderModule({ label: "GPU-resident WGS", code: WGS_SHADER });
     const names: GeneralPipelineName[] = [
       "initialize_targets",
+      "initialize_optimizer",
       "initialize_phase",
-      "make_field",
       "sample_targets",
-      "update_weights",
+      "evaluate_candidate",
+      "save_best_phase_codes",
+      "save_best_targets",
+      "restore_best_phase_codes",
+      "restore_best_targets",
+      "update_controls",
       "synthesize_phase",
       "clear_support",
       "mark_support",
@@ -363,11 +396,16 @@ export class WebGpuSequentialWgsSolver implements SequentialHologramBackend {
 
     const bindings: Record<GeneralPipelineName, number[]> = {
       initialize_targets: [0, 1, 2, 3, 4],
+      initialize_optimizer: [19],
       initialize_phase: [0, 1, 5, 6],
-      make_field: [0, 5, 7, 8],
       sample_targets: [0, 1, 2, 8],
-      update_weights: [0, 1, 2],
-      synthesize_phase: [0, 1, 2, 5],
+      evaluate_candidate: [0, 1, 2, 19],
+      save_best_phase_codes: [0, 5, 13, 19, 20, 21],
+      save_best_targets: [0, 2, 19, 22],
+      restore_best_phase_codes: [0, 5, 13, 20, 21],
+      restore_best_targets: [0, 2, 22],
+      update_controls: [0, 1, 2, 19],
+      synthesize_phase: [0, 1, 2, 5, 19],
       clear_support: [0, 18],
       mark_support: [0, 1, 18],
       quantize_codes: [0, 5, 10, 11, 13],
@@ -395,6 +433,10 @@ export class WebGpuSequentialWgsSolver implements SequentialHologramBackend {
       16: this.buffers.summary!,
       17: this.buffers.packed!,
       18: this.buffers.supportMask!,
+      19: this.buffers.optimizer!,
+      20: this.buffers.bestPhase!,
+      21: this.buffers.bestCodes!,
+      22: this.buffers.bestTargetState!,
     };
     for (const name of names) {
       const pipeline = this.pipelines.get(name)!;
@@ -593,6 +635,9 @@ export class WebGpuSequentialWgsSolver implements SequentialHologramBackend {
       timeUs: frame.timeUs,
       iterations,
       converged,
+      maximumRelativeAmplitudeError: relativeError,
+      amplitudeConvergenceTolerance: this.config.convergenceTolerance,
+      phaseConvergenceToleranceRad: phaseConvergenceTolerance(this.config),
       targetIntensityMean: mean,
       targetIntensityStd: std,
       targetIntensityCoefficientOfVariation: mean > 0 ? std / mean : 0,
@@ -1121,9 +1166,20 @@ struct TargetState {
   targetPhase: f32,
   measured: vec2<f32>,
   intensity: f32,
-  padding0: f32,
+  synthesisPhase: f32,
   padding1: f32,
   padding2: f32,
+}
+
+struct OptimizerState {
+  currentScore: f32,
+  bestScore: f32,
+  currentRelativeError: f32,
+  currentPhaseError: f32,
+  saveCandidate: u32,
+  performedIterations: u32,
+  phaseCorrectionApplied: u32,
+  updateActive: u32,
 }
 
 @group(0) @binding(0) var<uniform> params: FrameParameters;
@@ -1144,6 +1200,10 @@ struct TargetState {
 @group(0) @binding(16) var<storage, read_write> metricSummary: array<vec4<f32>>;
 @group(0) @binding(17) var<storage, read_write> packedOutput: array<u32>;
 @group(0) @binding(18) var<storage, read_write> supportMask: array<u32>;
+@group(0) @binding(19) var<storage, read_write> optimizer: OptimizerState;
+@group(0) @binding(20) var<storage, read_write> bestPhase: array<f32>;
+@group(0) @binding(21) var<storage, read_write> bestCodes: array<u32>;
+@group(0) @binding(22) var<storage, read_write> bestTargetStates: array<TargetState>;
 
 var<workgroup> reductionSum: array<f32, ${WORKGROUP_SIZE}>;
 var<workgroup> reductionGhost: array<f32, ${WORKGROUP_SIZE}>;
@@ -1179,21 +1239,41 @@ fn initialize_targets(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (index >= params.targetCount) { return; }
   var initialWeight = 1.0;
   var persistentPhase = targetInputs[index].inputPhase;
+  var synthesisPhase = persistentPhase;
   if (params.hasAccepted == 1u) {
     for (var previous = 0u; previous < params.acceptedTargetCount; previous = previous + 1u) {
       if (acceptedTargetInputs[previous].id == targetInputs[index].id) {
         initialWeight = acceptedTargetStates[previous].weight;
+        let previousTargetPhase = acceptedTargetStates[previous].targetPhase;
         if (params.phaseMode != 3u) {
-          persistentPhase = acceptedTargetStates[previous].targetPhase;
+          persistentPhase = previousTargetPhase;
         }
+        synthesisPhase = wrap_phase(
+          acceptedTargetStates[previous].synthesisPhase
+            + wrap_phase(persistentPhase - previousTargetPhase),
+        );
         break;
       }
     }
   }
   targetStates[index].weight = initialWeight;
   targetStates[index].targetPhase = persistentPhase;
+  targetStates[index].synthesisPhase = synthesisPhase;
   targetStates[index].measured = vec2<f32>(0.0);
   targetStates[index].intensity = 0.0;
+}
+
+@compute @workgroup_size(1)
+fn initialize_optimizer(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (gid.x != 0u) { return; }
+  optimizer.currentScore = 3.402823466e+38;
+  optimizer.bestScore = -1.0;
+  optimizer.currentRelativeError = 3.402823466e+38;
+  optimizer.currentPhaseError = 3.402823466e+38;
+  optimizer.saveCandidate = 0u;
+  optimizer.performedIterations = 0u;
+  optimizer.phaseCorrectionApplied = 0u;
+  optimizer.updateActive = 0u;
 }
 
 @compute @workgroup_size(${WORKGROUP_SIZE})
@@ -1272,9 +1352,90 @@ fn sample_targets(
   }
 }
 
+fn phase_convergence_tolerance() -> f32 {
+  let codeCount = select(65536.0, 256.0, params.formatBits == 8u);
+  return max(max(params.convergenceTolerance, 0.001), TAU / codeCount * 1.5);
+}
+
 @compute @workgroup_size(1)
-fn update_weights(@builtin(global_invocation_id) gid: vec3<u32>) {
-  if (gid.x != 0u || params.targetCount == 0u) { return; }
+fn evaluate_candidate(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (gid.x != 0u) { return; }
+  var numerator = 0.0;
+  var denominator = 0.0;
+  for (var index = 0u; index < params.targetCount; index = index + 1u) {
+    let desired = targetInputs[index].desired;
+    let measuredAmplitude = sqrt(max(0.0, targetStates[index].intensity));
+    numerator = numerator + desired * measuredAmplitude;
+    denominator = denominator + desired * desired;
+  }
+  let scale = select(1.0, numerator / denominator, denominator > params.epsilon);
+  var relativeError = 0.0;
+  var phaseError = 0.0;
+  for (var index = 0u; index < params.targetCount; index = index + 1u) {
+    let desired = targetInputs[index].desired;
+    let measuredAmplitude = sqrt(max(0.0, targetStates[index].intensity));
+    relativeError = max(
+      relativeError,
+      abs(measuredAmplitude - scale * desired) / (abs(scale * desired) + params.epsilon),
+    );
+    if (params.phaseMode != 0u) {
+      let measured = targetStates[index].measured;
+      let measuredPhase = atan2(measured.y, measured.x);
+      phaseError = max(phaseError, abs(wrap_phase(measuredPhase - targetStates[index].targetPhase)));
+    }
+  }
+  var score = relativeError / params.convergenceTolerance;
+  if (params.phaseMode != 0u) {
+    score = max(score, phaseError / phase_convergence_tolerance());
+  }
+  optimizer.currentScore = score;
+  optimizer.currentRelativeError = relativeError;
+  optimizer.currentPhaseError = phaseError;
+  optimizer.saveCandidate = select(0u, 1u, optimizer.bestScore < 0.0 || score < optimizer.bestScore);
+  if (optimizer.saveCandidate == 1u) {
+    optimizer.bestScore = score;
+  }
+}
+
+@compute @workgroup_size(${WORKGROUP_SIZE})
+fn save_best_phase_codes(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let index = gid.x;
+  if (optimizer.saveCandidate == 0u || index >= params.width * params.height) { return; }
+  bestPhase[index] = phase[index];
+  bestCodes[index] = codes[index];
+}
+
+@compute @workgroup_size(${TARGET_WORKGROUP_SIZE})
+fn save_best_targets(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let index = gid.x;
+  if (optimizer.saveCandidate == 0u || index >= params.targetCount) { return; }
+  bestTargetStates[index] = targetStates[index];
+}
+
+@compute @workgroup_size(${WORKGROUP_SIZE})
+fn restore_best_phase_codes(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let index = gid.x;
+  if (index >= params.width * params.height) { return; }
+  phase[index] = bestPhase[index];
+  codes[index] = bestCodes[index];
+}
+
+@compute @workgroup_size(${TARGET_WORKGROUP_SIZE})
+fn restore_best_targets(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let index = gid.x;
+  if (index >= params.targetCount) { return; }
+  targetStates[index] = bestTargetStates[index];
+}
+
+@compute @workgroup_size(1)
+fn update_controls(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (gid.x != 0u) { return; }
+  if (optimizer.currentScore <= 1.0 || params.targetCount == 0u) {
+    optimizer.updateActive = 0u;
+    return;
+  }
+  optimizer.updateActive = 1u;
+  optimizer.performedIterations = optimizer.performedIterations + 1u;
   var numerator = 0.0;
   var denominator = 0.0;
   for (var index = 0u; index < params.targetCount; index = index + 1u) {
@@ -1291,7 +1452,11 @@ fn update_weights(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (desired > params.epsilon) {
       let measuredAmplitude = sqrt(max(0.0, targetStates[index].intensity));
       let ratio = scale * desired / (measuredAmplitude + params.epsilon);
-      weight = clamp(weight * pow(ratio, params.gamma), params.minWeight, params.maxWeight);
+      weight = clamp(
+        weight * pow(ratio, min(params.gamma, ${WGS_MAX_STABLE_TRAP_AMPLITUDE_GAIN})),
+        params.minWeight,
+        params.maxWeight,
+      );
     }
     targetStates[index].weight = weight;
     weightSum = weightSum + weight;
@@ -1302,24 +1467,42 @@ fn update_weights(@builtin(global_invocation_id) gid: vec3<u32>) {
       targetStates[index].weight = targetStates[index].weight / meanWeight;
     }
   }
+
+  if (params.phaseMode == 0u) {
+    for (var index = 0u; index < params.targetCount; index = index + 1u) {
+      let measured = targetStates[index].measured;
+      targetStates[index].synthesisPhase = atan2(measured.y, measured.x);
+    }
+  } else if (optimizer.phaseCorrectionApplied == 0u) {
+    if (optimizer.currentPhaseError > phase_convergence_tolerance()) {
+      let phaseGain = select(
+        ${WGS_LOCKED_PHASE_PRECOMPENSATION_GAIN},
+        ${WGS_SOFT_PHASE_PRECOMPENSATION_GAIN},
+        params.phaseMode == 2u,
+      );
+      for (var index = 0u; index < params.targetCount; index = index + 1u) {
+        if (targetInputs[index].desired <= params.epsilon) { continue; }
+        let measured = targetStates[index].measured;
+        let measuredPhase = atan2(measured.y, measured.x);
+        let phaseError = wrap_phase(targetStates[index].targetPhase - measuredPhase);
+        targetStates[index].synthesisPhase = wrap_phase(
+          targetStates[index].synthesisPhase + phaseGain * phaseError,
+        );
+      }
+    }
+    optimizer.phaseCorrectionApplied = 1u;
+  }
 }
 
 @compute @workgroup_size(${WORKGROUP_SIZE})
 fn synthesize_phase(@builtin(global_invocation_id) gid: vec3<u32>) {
   let index = gid.x;
-  if (index >= params.width * params.height) { return; }
+  if (optimizer.updateActive == 0u || index >= params.width * params.height) { return; }
   var sum = vec2<f32>(0.0);
   var compensation = vec2<f32>(0.0);
   for (var targetIndex = 0u; targetIndex < params.targetCount; targetIndex = targetIndex + 1u) {
     let item = targetInputs[targetIndex];
-    var targetPhase = targetStates[targetIndex].targetPhase;
-    let measured = targetStates[targetIndex].measured;
-    let measuredPhase = atan2(measured.y, measured.x);
-    if (params.phaseMode == 0u) {
-      targetPhase = measuredPhase;
-    } else if (params.phaseMode == 2u) {
-      targetPhase = wrap_phase(targetPhase + 0.2 * wrap_phase(measuredPhase - targetPhase));
-    }
+    let targetPhase = targetStates[targetIndex].synthesisPhase;
     let targetAmplitude = targetStates[targetIndex].weight * item.desired;
     let cycles = wrapped_dft_cycles(item.position.x, index % params.width, params.width)
       + wrapped_dft_cycles(item.position.y, index / params.width, params.height);

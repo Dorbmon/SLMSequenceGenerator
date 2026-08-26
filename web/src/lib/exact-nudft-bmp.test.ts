@@ -80,6 +80,70 @@ describe("exact trap-domain Fourier regression", () => {
     expect(result.metrics.maximumTargetPhaseErrorRad).toBeCloseTo(phaseError, 9);
   });
 
+  it("certifies the default four traps and retains the best exported BMP", () => {
+    const width = 1272;
+    const height = 1024;
+    const fftWidth = 2048;
+    const calibration = createOpticalCalibration({
+      activeWidth: width,
+      activeHeight: height,
+      fftWidth,
+      fftHeight: height,
+    }, {
+      wavelengthNm: 780,
+      focalLengthMm: 20,
+      pixelPitchUm: 8,
+    }, "default-four-trap-regression");
+    const frame = {
+      frameIndex: 0,
+      timeUs: 0,
+      traps: [
+        { trapId: 1, atomId: null, xUm: -4, yUm: -4, intensity: 1, targetPhaseRad: 0, flags: 0 },
+        { trapId: 2, atomId: null, xUm: 4, yUm: -4, intensity: 1, targetPhaseRad: Math.PI / 2, flags: 0 },
+        { trapId: 3, atomId: null, xUm: -4, yUm: 4, intensity: 1, targetPhaseRad: Math.PI, flags: 0 },
+        { trapId: 4, atomId: null, xUm: 4, yUm: 4, intensity: 1, targetPhaseRad: -Math.PI / 2, flags: 0 },
+      ],
+    };
+    const solve = (iterations: number) => new SequentialWgsSolver(calibration, {
+      width: fftWidth,
+      height,
+      format: "UINT8",
+      firstFrameIterations: iterations,
+      maxIterations: iterations,
+      targetPhaseMode: "PHASE_LOCKED_WGS",
+      backgroundPolicy: "ZERO",
+      requireConvergence: false,
+    }).solveSequentialFrame(frame);
+
+    const fourIterations = solve(4);
+    const twelveIterations = solve(12);
+    expect(fourIterations.metrics.converged).toBe(true);
+    expect(fourIterations.metrics.maximumRelativeAmplitudeError)
+      .toBeLessThanOrEqual(fourIterations.metrics.amplitudeConvergenceTolerance);
+    expect(fourIterations.metrics.maximumTargetPhaseErrorRad)
+      .toBeLessThanOrEqual(fourIterations.metrics.phaseConvergenceToleranceRad);
+    expect(twelveIterations.pixels).toEqual(fourIterations.pixels);
+    expect(twelveIterations.metrics.maximumRelativeAmplitudeError)
+      .toBe(fourIterations.metrics.maximumRelativeAmplitudeError);
+    expect(twelveIterations.metrics.maximumTargetPhaseErrorRad)
+      .toBe(fourIterations.metrics.maximumTargetPhaseErrorRad);
+
+    const decoded = decodeGrayscaleBmp(encodeGrayscaleBmp(fourIterations.pixels, width, height));
+    const measured = frame.traps.map((trap) => {
+      const mapped = mapPhysicalPointToFft(trap, calibration, fftWidth, height);
+      return directCodeDft(decoded.pixels, width, height, mapped.x, mapped.y, fftWidth, height);
+    });
+    const amplitudes = measured.map((value) => Math.hypot(value.real, value.imag));
+    const scale = amplitudes.reduce((sum, value) => sum + value, 0) / amplitudes.length;
+    const amplitudeError = Math.max(...amplitudes.map((value) => Math.abs(value - scale) / scale));
+    const phaseError = Math.max(...measured.map((value, index) => angularDistance(
+      Math.atan2(value.imag, value.real),
+      frame.traps[index]!.targetPhaseRad,
+    )));
+    expect(amplitudeError).toBeCloseTo(fourIterations.metrics.maximumRelativeAmplitudeError, 9);
+    expect(phaseError).toBeCloseTo(fourIterations.metrics.maximumTargetPhaseErrorRad, 9);
+  }, 20_000);
+
   it("uses physical optics instead of fitting the loaded points", () => {
     const width = 128;
     const height = 64;

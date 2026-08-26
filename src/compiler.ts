@@ -1,7 +1,13 @@
 import { SlmCompilationError, SlmError, checkAbort } from "./errors.js";
 import { assignAtoms, assignmentCost } from "./assignment.js";
 import { MemoryFrameStore } from "./frame-store.js";
-import { frameDescriptor, SequentialWgsSolver } from "./hologram.js";
+import {
+  frameDescriptor,
+  SequentialWgsSolver,
+  WGS_LOCKED_PHASE_PRECOMPENSATION_GAIN,
+  WGS_MAX_STABLE_TRAP_AMPLITUDE_GAIN,
+  WGS_SOFT_PHASE_PRECOMPENSATION_GAIN,
+} from "./hologram.js";
 import { calibrationHash, inputHash, normalizeAndValidate } from "./normalization.js";
 import { planMotion } from "./planning.js";
 import { sampleTrajectory, sampleTrajectoryIntensity, sampleTrapFrames, validateContinuousTrajectories, validateTrapFrames } from "./trajectory.js";
@@ -279,7 +285,7 @@ export class SlmSequenceCompiler {
       assignmentAttempts: 1,
       plannerBackend: "none",
       plannerParameters: {},
-      wgsBackend: "wasm-fft-phase-locked-wgs",
+      wgsBackend: solver.backendId,
       wgsParameters: {
         targetPhaseMode: normalized.hologramConfig.targetPhaseMode,
         firstFrameIterations: normalized.hologramConfig.firstFrameIterations,
@@ -287,6 +293,17 @@ export class SlmSequenceCompiler {
         fftWidth: normalized.hologramConfig.width,
         fftHeight: normalized.hologramConfig.height,
         gamma: normalized.hologramConfig.gamma,
+        effectiveAmplitudeFeedbackGain: Math.min(
+          normalized.hologramConfig.gamma,
+          WGS_MAX_STABLE_TRAP_AMPLITUDE_GAIN,
+        ),
+        phasePrecompensationGain: normalized.hologramConfig.targetPhaseMode === "SOFT_PHASE_LOCKED_WGS"
+          ? WGS_SOFT_PHASE_PRECOMPENSATION_GAIN
+          : normalized.hologramConfig.targetPhaseMode === "REFERENCE_WGS"
+            ? 0
+            : WGS_LOCKED_PHASE_PRECOMPENSATION_GAIN,
+        retainBestQuantizedCandidate: true,
+        convergenceTolerance: normalized.hologramConfig.convergenceTolerance,
         epsilon: normalized.hologramConfig.epsilon,
       },
       outputWidth: calibration.manifest.activeWidth,
@@ -367,7 +384,14 @@ function validateCompleteSequence(
   }
   for (const metric of metrics) {
     if (!metric.numericalValid || !metric.accepted) errors.push({ code: "FRAME_QUALITY_REJECTED", stage: "VALIDATING_SEQUENCE", message: `Frame ${metric.frameIndex} is not accepted`, frameIndex: metric.frameIndex });
-    else if (!metric.converged) warnings.push({ code: "WGS_NOT_CONVERGED", stage: "VALIDATING_SEQUENCE", message: `Frame ${metric.frameIndex} exhausted its WGS budget without convergence`, frameIndex: metric.frameIndex });
+    else if (!metric.converged) warnings.push({
+      code: "WGS_NOT_CONVERGED",
+      stage: "VALIDATING_SEQUENCE",
+      message: `Frame ${metric.frameIndex} retained its best WGS candidate but did not meet ` +
+        `the amplitude gate (${metric.maximumRelativeAmplitudeError} <= ${metric.amplitudeConvergenceTolerance}) ` +
+        `and phase gate (${metric.maximumTargetPhaseErrorRad} rad <= ${metric.phaseConvergenceToleranceRad} rad)`,
+      frameIndex: metric.frameIndex,
+    });
   }
   return {
     accepted: errors.length === 0,
@@ -424,6 +448,17 @@ function makeManifest(
       fftWidth: normalized.hologramConfig.width,
       fftHeight: normalized.hologramConfig.height,
       gamma: normalized.hologramConfig.gamma,
+      effectiveAmplitudeFeedbackGain: Math.min(
+        normalized.hologramConfig.gamma,
+        WGS_MAX_STABLE_TRAP_AMPLITUDE_GAIN,
+      ),
+      phasePrecompensationGain: normalized.hologramConfig.targetPhaseMode === "SOFT_PHASE_LOCKED_WGS"
+        ? WGS_SOFT_PHASE_PRECOMPENSATION_GAIN
+        : normalized.hologramConfig.targetPhaseMode === "REFERENCE_WGS"
+          ? 0
+          : WGS_LOCKED_PHASE_PRECOMPENSATION_GAIN,
+      retainBestQuantizedCandidate: true,
+      convergenceTolerance: normalized.hologramConfig.convergenceTolerance,
       epsilon: normalized.hologramConfig.epsilon,
     },
     outputWidth: normalized.calibration.manifest.activeWidth,

@@ -3,6 +3,8 @@ import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from "vue
 import {
   type CalibrationPackage,
   type FrameMetrics,
+  WGS_LOCKED_PHASE_PRECOMPENSATION_GAIN,
+  WGS_MAX_STABLE_TRAP_AMPLITUDE_GAIN,
 } from "../../../src/index.js";
 import ComputationActivity from "../components/ComputationActivity.vue";
 import ForwardSimulator from "../components/ForwardSimulator.vue";
@@ -390,7 +392,7 @@ function generateFrame(): void {
     if (!response.metrics.accepted) {
       errorMessage.value = "The generated frame did not pass the numerical quality checks";
     } else if (!response.metrics.converged) {
-      qualityWarning.value = "The WGS iteration budget ended before convergence. The frame is exportable, but its optical quality is not certified; review the metrics before use.";
+      qualityWarning.value = convergenceWarning(response.metrics);
     }
     running.value = false;
     stopElapsedClock(response.elapsedMs);
@@ -415,6 +417,24 @@ function generateFrame(): void {
     },
   };
   worker.postMessage(request);
+}
+
+function convergenceWarning(metric: FrameMetrics): string {
+  const failed: string[] = [];
+  if (metric.maximumRelativeAmplitudeError > metric.amplitudeConvergenceTolerance) {
+    failed.push(
+      `relative amplitude error ${(metric.maximumRelativeAmplitudeError * 100).toFixed(4)}% `
+      + `(limit ${(metric.amplitudeConvergenceTolerance * 100).toFixed(4)}%)`,
+    );
+  }
+  if (metric.maximumTargetPhaseErrorRad > metric.phaseConvergenceToleranceRad) {
+    failed.push(
+      `phase error ${metric.maximumTargetPhaseErrorRad.toFixed(4)} rad `
+      + `(limit ${metric.phaseConvergenceToleranceRad.toFixed(4)} rad)`,
+    );
+  }
+  const detail = failed.length > 0 ? failed.join("; ") : "the configured convergence gates";
+  return `The best frame was retained, but it is not certified: ${detail}. Increase the iteration budget or revise the optical target.`;
 }
 
 function rejectFrame(message: string, jobId: number, worker: Worker): void {
@@ -515,6 +535,9 @@ function exportMetadata(): void {
       backend: resultBackendId.value,
       requestedIterations: iterations.value,
       backgroundPolicy: "ZERO",
+      effectiveAmplitudeFeedbackGain: WGS_MAX_STABLE_TRAP_AMPLITUDE_GAIN,
+      phasePrecompensationGain: WGS_LOCKED_PHASE_PRECOMPENSATION_GAIN,
+      retainBestQuantizedCandidate: true,
       elapsedMs: elapsedMs.value,
     },
     calibration: {
@@ -744,6 +767,7 @@ defineExpose({ reset });
       <div><small>TWEEZERS</small><strong>{{ tweezers.length }}</strong></div>
       <div><small>CALCULATION TIME</small><strong>{{ elapsedMs === null ? "--" : `${(elapsedMs / 1000).toFixed(2)}s` }}</strong></div>
       <div><small>DIFFRACTION EFFICIENCY</small><strong>{{ metrics ? `${(metrics.diffractionEfficiency * 100).toFixed(1)}%` : "--" }}</strong></div>
+      <div><small>MAX AMPLITUDE ERROR</small><strong>{{ metrics ? `${(metrics.maximumRelativeAmplitudeError * 100).toFixed(4)}%` : "--" }}</strong></div>
       <div><small>MAX PHASE ERROR</small><strong>{{ metrics ? `${metrics.maximumTargetPhaseErrorRad.toFixed(2)} rad` : "--" }}</strong></div>
     </div>
 

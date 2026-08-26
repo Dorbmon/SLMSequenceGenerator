@@ -220,6 +220,47 @@ test("uses a seeded stable phase when the initial target superposition cancels",
   assert.equal(first.metrics.numericalValid, true);
 });
 
+test("a larger WGS budget cannot replace a better quantized candidate", () => {
+  const width = 64;
+  const candidateCalibration = calibration(width, width);
+  candidateCalibration.coordinateTransform = {
+    originXUm: width / 2,
+    originYUm: width / 2,
+    scaleX: 1,
+    scaleY: 1,
+  };
+  const frame = {
+    frameIndex: 0,
+    timeUs: 0,
+    traps: Array.from({ length: 6 }, (_, index) => ({
+      trapId: index + 1,
+      atomId: null,
+      xUm: Math.cos(index * Math.PI / 3) * 10,
+      yUm: Math.sin(index * Math.PI / 3) * 10,
+      intensity: 0.5 + (index % 3) * 0.25,
+      targetPhaseRad: -2.5 + index * 0.8,
+      flags: 0,
+    })),
+  };
+  const solve = (iterations) => new SequentialWgsSolver(candidateCalibration, {
+    width,
+    height: width,
+    firstFrameIterations: iterations,
+    maxIterations: iterations,
+    targetPhaseMode: "PHASE_LOCKED_WGS",
+    backgroundPolicy: "ZERO",
+  }).solveSequentialFrame(frame);
+  const score = (metrics) => Math.max(
+    metrics.maximumRelativeAmplitudeError / metrics.amplitudeConvergenceTolerance,
+    metrics.maximumTargetPhaseErrorRad / metrics.phaseConvergenceToleranceRad,
+  );
+
+  const fourIterations = solve(4);
+  const twelveIterations = solve(12);
+  assert.ok(score(twelveIterations.metrics) <= score(fourIterations.metrics));
+  assert.equal(twelveIterations.metrics.numericalValid, true);
+});
+
 test("routes a constrained crossing without collision", async () => {
   const options = compilerOptions();
   options.planner = { minimumSeparationUm: 1, geometricMarginUm: 0.1, gridResolutionUm: 1, maxSearchTicks: 100, maxCbsNodes: 2000 };

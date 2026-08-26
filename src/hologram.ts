@@ -23,14 +23,34 @@ import { wasmNudftSampleTargets, wasmNudftSynthesizePhase } from "./wasm-core.js
 // the non-convex solver into unrelated solutions at destructive cancellations.
 export const WGS_INITIALIZATION_CANCELLATION_RATIO = 1e-3;
 
+// Trap coefficients are strongly coupled after the phase-only projection.
+// A large multiplicative WGS step therefore creates a two-cycle even when the
+// configured gamma is otherwise reasonable for a full-plane GS solve.
+export const WGS_MAX_STABLE_TRAP_AMPLITUDE_GAIN = 0.1;
+export const WGS_LOCKED_PHASE_PRECOMPENSATION_GAIN = 0.7;
+export const WGS_SOFT_PHASE_PRECOMPENSATION_GAIN = 0.2;
+
 interface SolverState {
   phase: Float64Array;
   weights: Map<number, number>;
   targetPhases: Map<number, number>;
+  synthesisPhases: Map<number, number>;
   measuredPhases: Map<number, number>;
   measuredIntensities: Map<number, number>;
   codes: Uint8Array | Uint16Array;
   frameIndex: number;
+}
+
+interface QuantizedCandidate {
+  phase: Float64Array;
+  weights: Map<number, number>;
+  synthesisPhases: Map<number, number>;
+  codes: Uint8Array | Uint16Array;
+  measured: { real: number; imag: number }[];
+  amplitudes: number[];
+  relativeAmplitudeError: number;
+  phaseError: number;
+  certificateScore: number;
 }
 
 export class SequentialWgsSolver {
@@ -85,13 +105,20 @@ export class SequentialWgsSolver {
     const targetY = Float64Array.from(mappedTargets, (target) => target.y);
     const previous = this.accepted;
     const targetPhases = new Map<number, number>();
+    const synthesisPhases = new Map<number, number>();
     const weights = new Map<number, number>();
     for (const trap of frame.traps) {
-      targetPhases.set(
+      const previousTargetPhase = previous?.targetPhases.get(trap.trapId);
+      const requestedTargetPhase = this.config.targetPhaseMode === "PHASE_INTERPOLATED_WGS"
+        ? trap.targetPhaseRad
+        : previousTargetPhase ?? trap.targetPhaseRad;
+      targetPhases.set(trap.trapId, requestedTargetPhase);
+      const previousSynthesisPhase = previous?.synthesisPhases.get(trap.trapId);
+      synthesisPhases.set(
         trap.trapId,
-        this.config.targetPhaseMode === "PHASE_INTERPOLATED_WGS"
-          ? trap.targetPhaseRad
-          : previous?.targetPhases.get(trap.trapId) ?? trap.targetPhaseRad,
+        previousSynthesisPhase === undefined
+          ? requestedTargetPhase
+          : wrapPhase(previousSynthesisPhase + wrapPhase(requestedTargetPhase - (previousTargetPhase ?? requestedTargetPhase))),
       );
       weights.set(trap.trapId, previous?.weights.get(trap.trapId) ?? 1);
     }
@@ -102,39 +129,91 @@ export class SequentialWgsSolver {
       Math.max(1, iterationBudget ?? (previous ? this.config.subsequentFrameIterations : this.config.firstFrameIterations)),
       this.config.maxIterations,
     );
-    let measured = frame.traps.map(() => ({ real: 0, imag: 0 }));
-    let amplitudes = frame.traps.map(() => 0);
-    let converged = frame.traps.length === 0;
-    let maxRelativeError = Number.POSITIVE_INFINITY;
+    const desired = frame.traps.map((trap) => Math.sqrt(Math.max(0, trap.intensity)));
+    const amplitudeTolerance = this.config.convergenceTolerance;
+    const phaseTolerance = phaseConvergenceTolerance(this.config);
+    const amplitudeGain = Math.min(this.config.gamma, WGS_MAX_STABLE_TRAP_AMPLITUDE_GAIN);
+    let best: QuantizedCandidate | undefined;
     let performedIterations = 0;
-    for (let iteration = 0; iteration < iterations; iteration += 1) {
+    let evaluated = this.evaluateQuantizedPhase(phase, targetX, targetY);
+    const considerCandidate = (): void => {
+      const scale = fitAmplitudeScale(evaluated.amplitudes, desired, this.config.epsilon);
+      const relativeAmplitudeError = maximumRelativeAmplitudeError(
+        evaluated.amplitudes,
+        desired,
+        scale,
+        this.config.epsilon,
+      );
+      const phaseError = maximumTargetPhaseError(
+        frame.traps,
+        evaluated.measured,
+        targetPhases,
+        this.config.targetPhaseMode,
+      );
+      const score = convergenceCertificateScore(
+        relativeAmplitudeError,
+        phaseError,
+        amplitudeTolerance,
+        phaseTolerance,
+        this.config.targetPhaseMode,
+      );
+      if (best && score >= best.certificateScore) return;
+      best = {
+        phase: new Float64Array(phase),
+        weights: new Map(weights),
+        synthesisPhases: new Map(synthesisPhases),
+        codes: cloneCodes(evaluated.codes),
+        measured: evaluated.measured.map((value) => ({ ...value })),
+        amplitudes: [...evaluated.amplitudes],
+        relativeAmplitudeError,
+        phaseError,
+        certificateScore: score,
+      };
+    };
+    considerCandidate();
+
+    for (let iteration = 0; iteration < iterations && best!.certificateScore > 1; iteration += 1) {
       performedIterations += 1;
-      const spatial = this.spatialField(phase);
-      measured = this.measureTargets(spatial, targetX, targetY);
-      amplitudes = measured.map((value) => Math.hypot(value.real, value.imag));
-      const desired = frame.traps.map((trap) => Math.sqrt(Math.max(0, trap.intensity)));
-      let numerator = 0;
-      let denominator = 0;
-      for (let index = 0; index < desired.length; index += 1) {
-        numerator += desired[index]! * amplitudes[index]!;
-        denominator += desired[index]! * desired[index]!;
-      }
-      const scale = denominator > this.config.epsilon ? numerator / denominator : 1;
+      const scale = fitAmplitudeScale(evaluated.amplitudes, desired, this.config.epsilon);
       for (let index = 0; index < frame.traps.length; index += 1) {
         const trap = frame.traps[index]!;
         if (desired[index]! <= this.config.epsilon) continue;
         const oldWeight = weights.get(trap.trapId) ?? 1;
-        const ratio = scale * desired[index]! / (amplitudes[index]! + this.config.epsilon);
-        weights.set(trap.trapId, clamp(oldWeight * ratio ** this.config.gamma, this.config.minWeight, this.config.maxWeight));
+        const ratio = scale * desired[index]! / (evaluated.amplitudes[index]! + this.config.epsilon);
+        weights.set(trap.trapId, clamp(oldWeight * ratio ** amplitudeGain, this.config.minWeight, this.config.maxWeight));
       }
       normalizeWeights(weights);
+
+      if (this.config.targetPhaseMode === "REFERENCE_WGS") {
+        frame.traps.forEach((trap, index) => {
+          synthesisPhases.set(trap.trapId, Math.atan2(evaluated.measured[index]!.imag, evaluated.measured[index]!.real));
+        });
+      } else if (iteration === 0 && maximumTargetPhaseError(
+        frame.traps,
+        evaluated.measured,
+        targetPhases,
+        this.config.targetPhaseMode,
+      ) > phaseTolerance) {
+        const phaseGain = this.config.targetPhaseMode === "SOFT_PHASE_LOCKED_WGS"
+          ? WGS_SOFT_PHASE_PRECOMPENSATION_GAIN
+          : WGS_LOCKED_PHASE_PRECOMPENSATION_GAIN;
+        frame.traps.forEach((trap, index) => {
+          if (desired[index]! <= this.config.epsilon) return;
+          const measuredPhase = Math.atan2(evaluated.measured[index]!.imag, evaluated.measured[index]!.real);
+          const requestedPhase = targetPhases.get(trap.trapId) ?? trap.targetPhaseRad;
+          const synthesisPhase = synthesisPhases.get(trap.trapId) ?? requestedPhase;
+          synthesisPhases.set(trap.trapId, wrapPhase(
+            synthesisPhase + phaseGain * wrapPhase(requestedPhase - measuredPhase),
+          ));
+        });
+      }
+
       const synthesizedAmplitudes = new Float64Array(frame.traps.length);
       const synthesizedPhases = new Float64Array(frame.traps.length);
       for (let index = 0; index < frame.traps.length; index += 1) {
         const trap = frame.traps[index]!;
-        const targetPhase = chooseTargetPhase(this.config.targetPhaseMode, targetPhases.get(trap.trapId) ?? trap.targetPhaseRad, measured[index]!);
         synthesizedAmplitudes[index] = (weights.get(trap.trapId) ?? 1) * desired[index]!;
-        synthesizedPhases[index] = targetPhase;
+        synthesizedPhases[index] = synthesisPhases.get(trap.trapId) ?? targetPhases.get(trap.trapId) ?? trap.targetPhaseRad;
       }
       wasmNudftSynthesizePhase(
         targetX,
@@ -148,39 +227,27 @@ export class SequentialWgsSolver {
         this.config.deterministicSeed,
         false,
       );
-      maxRelativeError = maximumRelativeAmplitudeError(amplitudes, desired, scale, this.config.epsilon);
-      const phaseError = maximumTargetPhaseError(frame.traps, measured, targetPhases, this.config.targetPhaseMode);
-      converged = maxRelativeError <= this.config.convergenceTolerance && phaseError <= phaseConvergenceTolerance(this.config);
-      if (converged) break;
+      evaluated = this.evaluateQuantizedPhase(phase, targetX, targetY);
+      considerCandidate();
     }
 
-    const optimizedMeasured = this.measureTargets(this.spatialField(phase), targetX, targetY);
-    const optimizedAmplitudes = optimizedMeasured.map((value) => Math.hypot(value.real, value.imag));
-    const optimizedDesired = frame.traps.map((trap) => Math.sqrt(Math.max(0, trap.intensity)));
-    maxRelativeError = maximumRelativeAmplitudeError(
-      optimizedAmplitudes,
-      optimizedDesired,
-      fitAmplitudeScale(optimizedAmplitudes, optimizedDesired, this.config.epsilon),
-      this.config.epsilon,
-    );
-    converged = maxRelativeError <= this.config.convergenceTolerance &&
-      maximumTargetPhaseError(frame.traps, optimizedMeasured, targetPhases, this.config.targetPhaseMode) <= phaseConvergenceTolerance(this.config);
-    const displayPhase = this.composeDisplayPhase(phase);
-    const codes = this.quantize(displayPhase);
-    const finalSpatial = this.spatialField(this.decodeCodes(codes, displayPhase));
-    const finalMeasured = this.measureTargets(finalSpatial, targetX, targetY);
-    const finalAmplitudes = finalMeasured.map((value) => Math.hypot(value.real, value.imag));
+    const selected = best!;
+    phase = selected.phase;
+    const finalWeights = selected.weights;
+    const finalSynthesisPhases = selected.synthesisPhases;
+    const codes = selected.codes;
+    const finalDisplayPhase = this.composeDisplayPhase(phase);
+    const finalSpatial = this.spatialField(this.decodeCodes(codes, finalDisplayPhase));
+    const finalMeasured = selected.measured;
+    const finalAmplitudes = selected.amplitudes;
     const measuredPhases = new Map<number, number>();
     const measuredIntensities = new Map<number, number>();
     frame.traps.forEach((trap, index) => {
       measuredPhases.set(trap.trapId, Math.atan2(finalMeasured[index]!.imag, finalMeasured[index]!.real));
       measuredIntensities.set(trap.trapId, finalAmplitudes[index]! ** 2);
     });
-    const finalDesired = frame.traps.map((trap) => Math.sqrt(Math.max(0, trap.intensity)));
-    const finalScale = fitAmplitudeScale(finalAmplitudes, finalDesired, this.config.epsilon);
-    maxRelativeError = maximumRelativeAmplitudeError(finalAmplitudes, finalDesired, finalScale, this.config.epsilon);
-    converged = maxRelativeError <= this.config.convergenceTolerance &&
-      maximumTargetPhaseError(frame.traps, finalMeasured, targetPhases, this.config.targetPhaseMode) <= phaseConvergenceTolerance(this.config);
+    const maxRelativeError = selected.relativeAmplitudeError;
+    const converged = selected.certificateScore <= 1;
     const finalForward = cloneField(finalSpatial);
     fft2d(finalForward, false);
     const metrics = this.evaluateMetrics(
@@ -190,19 +257,20 @@ export class SequentialWgsSolver {
       finalAmplitudes,
       codes,
       previous,
-      performedIterations,
+      Math.max(1, performedIterations),
       converged,
       maxRelativeError,
       started,
       targetPhases,
       measuredPhases,
       measuredIntensities,
-      weights,
+      finalWeights,
     );
     this.candidate = {
       phase,
-      weights: new Map(weights),
+      weights: new Map(finalWeights),
       targetPhases: new Map(targetPhases),
+      synthesisPhases: new Map(finalSynthesisPhases),
       measuredPhases,
       measuredIntensities,
       codes,
@@ -219,6 +287,7 @@ export class SequentialWgsSolver {
       phase: new Float64Array(this.candidate.phase),
       weights: new Map(this.candidate.weights),
       targetPhases: new Map(this.candidate.targetPhases),
+      synthesisPhases: new Map(this.candidate.synthesisPhases),
       measuredPhases: new Map(this.candidate.measuredPhases),
       measuredIntensities: new Map(this.candidate.measuredIntensities),
       codes: new (this.candidate.codes.constructor as { new (source: Uint8Array | Uint16Array): Uint8Array | Uint16Array })(this.candidate.codes),
@@ -288,6 +357,29 @@ export class SequentialWgsSolver {
       real: measured.real[index]!,
       imag: measured.imag[index]!,
     }));
+  }
+
+  /** Evaluate the exact field represented by the exportable display codes. */
+  private evaluateQuantizedPhase(
+    phase: Float64Array,
+    targetX: Float64Array,
+    targetY: Float64Array,
+  ): {
+    codes: Uint8Array | Uint16Array;
+    spatial: ComplexField;
+    measured: { real: number; imag: number }[];
+    amplitudes: number[];
+  } {
+    const displayPhase = this.composeDisplayPhase(phase);
+    const codes = this.quantize(displayPhase);
+    const spatial = this.spatialField(this.decodeCodes(codes, displayPhase));
+    const measured = this.measureTargets(spatial, targetX, targetY);
+    return {
+      codes,
+      spatial,
+      measured,
+      amplitudes: measured.map((value) => Math.hypot(value.real, value.imag)),
+    };
   }
 
   private calibrationValueAt(
@@ -440,6 +532,9 @@ export class SequentialWgsSolver {
       timeUs: frame.timeUs,
       iterations,
       converged,
+      maximumRelativeAmplitudeError: relativeError,
+      amplitudeConvergenceTolerance: this.config.convergenceTolerance,
+      phaseConvergenceToleranceRad: phaseConvergenceTolerance(this.config),
       targetIntensityMean: mean,
       targetIntensityStd: std,
       targetIntensityCoefficientOfVariation: mean > 0 ? std / mean : 0,
@@ -473,17 +568,6 @@ export function solveHologramFrame(
   return result;
 }
 
-function chooseTargetPhase(
-  mode: HologramConfig["targetPhaseMode"],
-  persistent: number,
-  measured: { real: number; imag: number },
-): number {
-  const measuredPhase = Math.atan2(measured.imag, measured.real);
-  if (mode === "REFERENCE_WGS") return measuredPhase;
-  if (mode === "SOFT_PHASE_LOCKED_WGS") return wrapPhase(persistent + 0.2 * wrapPhase(measuredPhase - persistent));
-  return persistent;
-}
-
 function maximumTargetPhaseError(
   traps: TrapState[],
   measured: { real: number; imag: number }[],
@@ -504,6 +588,18 @@ function phaseConvergenceTolerance(config: Required<HologramConfig>): number {
   return Math.max(config.convergenceTolerance, 1e-3, TAU / codeCount * 1.5);
 }
 
+function convergenceCertificateScore(
+  relativeAmplitudeError: number,
+  phaseError: number,
+  amplitudeTolerance: number,
+  phaseTolerance: number,
+  mode: HologramConfig["targetPhaseMode"],
+): number {
+  const amplitudeScore = relativeAmplitudeError / amplitudeTolerance;
+  if (mode === "REFERENCE_WGS") return amplitudeScore;
+  return Math.max(amplitudeScore, phaseError / phaseTolerance);
+}
+
 function fitAmplitudeScale(amplitudes: number[], desired: number[], epsilon: number): number {
   let numerator = 0;
   let denominator = 0;
@@ -519,6 +615,10 @@ function normalizeWeights(weights: Map<number, number>): void {
   const mean = [...weights.values()].reduce((sum, value) => sum + value, 0) / weights.size;
   if (mean <= 0 || !Number.isFinite(mean)) return;
   for (const [id, value] of weights) weights.set(id, value / mean);
+}
+
+function cloneCodes(codes: Uint8Array | Uint16Array): Uint8Array | Uint16Array {
+  return codes instanceof Uint8Array ? new Uint8Array(codes) : new Uint16Array(codes);
 }
 
 function passesQualityGates(metrics: FrameMetrics, gates: HologramConfig["qualityGates"]): boolean {
