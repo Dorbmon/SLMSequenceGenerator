@@ -114,3 +114,59 @@ button, input, select { font: inherit; } button { cursor: pointer; }
 @media (max-width: 480px) { .controls > .computation-activity { margin-right: 14px; margin-left: 14px; }.computation-activity { grid-template-columns: 46px minmax(0,1fr); padding: 9px; }.computation-orbit { width: 42px; height: 42px; }.computation-orbit b { inset: 18px; } }
 @media (max-width: 980px) { .target-image-layout { grid-template-columns: 1fr; }.target-image-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }.target-image-heading, .target-image-controls .computation-activity, .target-image-error, .target-image-diagnostics, .target-image-apply { grid-column: 1/-1; }.target-image-field-heading { grid-column: 1/-1; }.target-image-preview canvas { max-height: none; } }
 @media (max-width: 620px) { .target-image-importer { padding: 12px; }.target-image-empty { grid-template-columns: 48px 1fr; padding: 14px; }.target-image-empty > button { grid-column: 1/-1; width: 100%; }.image-import-mark { width: 44px; height: 44px; }.target-image-controls { display: block; }.target-image-preview-bar { position: relative; }.target-image-number-grid { grid-template-columns: 1fr; }.target-image-field-heading { align-items: flex-start; flex-direction: column; }.target-image-subbar > span:last-child { display: none; } }
+
+.tweezer-manual-subbar { border-top: 1px solid var(--line); }
+.manual-tweezer-drawer { padding: 12px 20px 20px; border-bottom: 1px solid var(--line); }
+.manual-tweezer-drawer.is-disabled { opacity: .58; }
+.manual-drawing-layout { display: grid; grid-template-columns: minmax(0,1.35fr) minmax(230px,.65fr); gap: 12px; align-items: start; }
+.manual-drawing-preview { position: relative; min-width: 0; overflow: hidden; border: 1px solid var(--line); background: #050a08; }
+.manual-drawing-surface { display: block; width: 100%; max-height: 520px; touch-action: none; user-select: none; }
+.manual-drawing-surface.is-draw { cursor: crosshair; }
+.manual-drawing-surface.is-erase { cursor: cell; }
+.manual-field-background { fill: #07100d; }
+.manual-field-grid { stroke: rgba(129,216,208,.075); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.manual-field-axis { stroke: rgba(129,216,208,.24); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.manual-stroke-guide { fill: none; stroke: rgba(129,216,208,.35); stroke-width: 1; stroke-dasharray: 4 4; vector-effect: non-scaling-stroke; }
+.manual-trap-point { fill: var(--acid); stroke: rgba(255,255,255,.8); stroke-width: 1; vector-effect: non-scaling-stroke; filter: drop-shadow(0 0 3px rgba(185,243,107,.42)); }
+.manual-draw-cursor { fill: none; stroke: var(--cyan); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.manual-eraser-cursor { fill: rgba(255,147,125,.06); stroke: #ff937d; stroke-width: 1; stroke-dasharray: 3 3; vector-effect: non-scaling-stroke; }
+.manual-drawing-label { position: absolute; z-index: 2; top: 0; right: 0; left: 0; display: flex; justify-content: space-between; gap: 12px; padding: 9px 10px; pointer-events: none; color: var(--faint); background: linear-gradient(rgba(5,10,8,.88),transparent); font: 7px var(--mono); letter-spacing: .08em; }
+.manual-drawing-label span:first-child { color: var(--acid); }
+.manual-drawing-scale { position: absolute; z-index: 2; right: 10px; bottom: 8px; left: 10px; display: flex; justify-content: space-between; pointer-events: none; color: var(--faint); font: 7px var(--mono); }
+.manual-drawing-scale strong { color: var(--cyan); font-weight: 400; }
+.manual-drawing-controls { min-width: 0; padding: 14px; border: 1px solid var(--line); background: rgba(11,22,18,.66); }
+.manual-drawing-heading { display: flex; justify-content: space-between; gap: 10px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.manual-drawing-heading > div { display: grid; gap: 5px; }
+.manual-drawing-heading small, .manual-drawing-heading > span { color: var(--cyan); font: 7px var(--mono); letter-spacing: .08em; }
+.manual-drawing-heading strong { color: var(--acid); font: 13px var(--mono); font-weight: 400; }
+.manual-drawing-heading > span { color: var(--faint); font-size: 6px; text-align: right; }
+.manual-tool-choice { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 13px; }
+.manual-tool-choice button, .manual-history-actions button { padding: 8px; border: 1px solid var(--line); color: var(--faint); background: transparent; font: 7px var(--mono); letter-spacing: .06em; text-transform: uppercase; }
+.manual-tool-choice button.is-active { border-color: var(--acid); color: var(--bg); background: var(--acid); }
+.manual-tool-choice button:hover:not(:disabled), .manual-history-actions button:hover:not(:disabled) { border-color: var(--cyan); color: var(--cyan); }
+.manual-control-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 14px; }
+.manual-control-grid label { display: grid; gap: 6px; color: var(--faint); font: 7px var(--mono); letter-spacing: .06em; }
+.manual-control-grid input { width: 100%; min-width: 0; padding: 7px; border: 1px solid var(--line); outline: 0; color: var(--ink); background: #0b1612; font: 9px var(--mono); }
+.manual-control-grid input:focus { border-color: var(--acid); }
+.manual-resolution-note { margin: 11px 0 0; color: #f2cf74; font: 6px/1.5 var(--mono); letter-spacing: .04em; }
+.manual-history-actions { display: grid; grid-template-columns: repeat(3,1fr); gap: 5px; margin-top: 12px; }
+.manual-tool-choice button:disabled, .manual-history-actions button:disabled { cursor: not-allowed; opacity: .4; }
+.manual-drawing-status { min-height: 30px; margin: 11px 0 0; color: var(--muted); font: 7px/1.5 var(--mono); }
+.manual-drawing-apply { width: 100%; margin-top: 10px; }
+
+.forward-display-controls > label + label { margin-top: 16px; }
+.forward-view-summary { margin: 7px 0 15px; color: var(--cyan); font: 7px/1.45 var(--mono); letter-spacing: .05em; }
+.forward-simulator-grid { align-items: start; }
+.forward-map-stage { min-height: 0; }
+.forward-target-markers { position: absolute; z-index: 2; inset: 0; overflow: hidden; pointer-events: none; }
+.forward-target-markers i { position: absolute; width: 9px; height: 9px; border: 1px solid rgba(230,238,232,.78); border-radius: 50%; box-shadow: 0 0 5px rgba(185,243,107,.45), inset 0 0 4px rgba(185,243,107,.3); transform: translate(-50%,-50%); }
+
+@media (max-width: 760px) {
+  .manual-drawing-layout { grid-template-columns: 1fr; }
+  .manual-drawing-surface { max-height: none; }
+}
+@media (max-width: 560px) {
+  .manual-tweezer-drawer { padding-right: 14px; padding-left: 14px; }
+  .manual-control-grid { grid-template-columns: 1fr; }
+  .manual-drawing-label span:last-child { display: none; }
+}

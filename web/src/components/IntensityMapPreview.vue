@@ -1,5 +1,12 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import type { ForwardSimulationRegion } from "../lib/forward-simulation.js";
+
+interface TargetMarker {
+  x: number;
+  y: number;
+  label: string;
+}
 
 const props = defineProps<{
   intensity: Float32Array | null;
@@ -9,6 +16,10 @@ const props = defineProps<{
   status: string;
   logarithmic: boolean;
   floorDb: number;
+  region: ForwardSimulationRegion | null;
+  targetMarkers: readonly TargetMarker[];
+  physicalAspectRatio: number;
+  viewLabel: string;
 }>();
 
 const canvas = ref<HTMLCanvasElement | null>(null);
@@ -17,6 +28,31 @@ let pooledSource: Float32Array | null = null;
 let pooledWidth = 0;
 let pooledHeight = 0;
 let pooledIntensity = new Float32Array();
+let pooledRegionKey = "";
+
+const normalizedRegion = computed<ForwardSimulationRegion | null>(() => {
+  if (props.width <= 0 || props.height <= 0) return null;
+  const candidate = props.region ?? { x: 0, y: 0, width: props.width, height: props.height };
+  const x = Math.max(0, Math.min(props.width - 1, Math.floor(candidate.x)));
+  const y = Math.max(0, Math.min(props.height - 1, Math.floor(candidate.y)));
+  const width = Math.max(1, Math.min(props.width - x, Math.floor(candidate.width)));
+  const height = Math.max(1, Math.min(props.height - y, Math.floor(candidate.height)));
+  return { x, y, width, height };
+});
+const visibleMarkers = computed(() => {
+  const region = normalizedRegion.value;
+  if (!region) return [];
+  return props.targetMarkers
+    .filter((marker) => (
+      marker.x >= region.x && marker.x <= region.x + region.width - 1 &&
+      marker.y >= region.y && marker.y <= region.y + region.height - 1
+    ))
+    .map((marker) => ({
+      ...marker,
+      left: `${(marker.x - region.x) / Math.max(1, region.width - 1) * 100}%`,
+      top: `${(marker.y - region.y) / Math.max(1, region.height - 1) * 100}%`,
+    }));
+});
 
 function scheduleDraw(): void {
   cancelAnimationFrame(frameRequest);
@@ -48,22 +84,26 @@ function draw(): void {
 }
 
 function updatePool(source: Float32Array): void {
-  if (pooledSource === source && pooledWidth > 0 && pooledHeight > 0) return;
-  const scale = Math.max(1, props.width / 1024, props.height / 640);
-  pooledWidth = Math.max(1, Math.round(props.width / scale));
-  pooledHeight = Math.max(1, Math.round(props.height / scale));
+  const region = normalizedRegion.value;
+  if (!region) return;
+  const regionKey = `${region.x}:${region.y}:${region.width}:${region.height}`;
+  if (pooledSource === source && pooledRegionKey === regionKey && pooledWidth > 0 && pooledHeight > 0) return;
+  const scale = Math.max(1, region.width / 1024, region.height / 640);
+  pooledWidth = Math.max(1, Math.round(region.width / scale));
+  pooledHeight = Math.max(1, Math.round(region.height / scale));
   pooledIntensity = new Float32Array(pooledWidth * pooledHeight);
-  const xMap = Uint32Array.from({ length: props.width }, (_, x) => Math.min(pooledWidth - 1, Math.floor(x * pooledWidth / props.width)));
-  const yMap = Uint32Array.from({ length: props.height }, (_, y) => Math.min(pooledHeight - 1, Math.floor(y * pooledHeight / props.height)));
-  for (let y = 0; y < props.height; y += 1) {
-    const outputRow = yMap[y]! * pooledWidth;
-    const sourceRow = y * props.width;
-    for (let x = 0; x < props.width; x += 1) {
-      const destination = outputRow + xMap[x]!;
-      pooledIntensity[destination] = Math.max(pooledIntensity[destination]!, source[sourceRow + x]!);
+  for (let localY = 0; localY < region.height; localY += 1) {
+    const outputY = Math.min(pooledHeight - 1, Math.floor(localY * pooledHeight / region.height));
+    const outputRow = outputY * pooledWidth;
+    const sourceRow = (region.y + localY) * props.width + region.x;
+    for (let localX = 0; localX < region.width; localX += 1) {
+      const outputX = Math.min(pooledWidth - 1, Math.floor(localX * pooledWidth / region.width));
+      const destination = outputRow + outputX;
+      pooledIntensity[destination] = Math.max(pooledIntensity[destination]!, source[sourceRow + localX]!);
     }
   }
   pooledSource = source;
+  pooledRegionKey = regionKey;
 }
 
 function displayValue(value: number): number {
@@ -87,6 +127,7 @@ function heatColor(value: number): [number, number, number] {
 
 function drawPlaceholder(context: CanvasRenderingContext2D): void {
   pooledSource = null;
+  pooledRegionKey = "";
   context.canvas.width = 760;
   context.canvas.height = 430;
   context.fillStyle = "#07100d";
@@ -116,7 +157,7 @@ function clamp(value: number, minimum: number, maximum: number): number {
 }
 
 watch(
-  () => [props.intensity, props.width, props.height, props.logarithmic, props.floorDb],
+  () => [props.intensity, props.width, props.height, props.logarithmic, props.floorDb, props.region],
   scheduleDraw,
   { flush: "post" },
 );
@@ -129,20 +170,27 @@ onBeforeUnmount(() => cancelAnimationFrame(frameRequest));
   <section class="forward-map-preview" aria-labelledby="forward-map-title">
     <div class="panel-bar">
       <span id="forward-map-title"><b class="live-pulse"></b> SIMULATED INTENSITY MAP</span>
-      <span>{{ width > 0 && height > 0 ? `${width} × ${height}` : "FFT GRID / --" }}</span>
+      <span>{{ normalizedRegion ? `${normalizedRegion.width} × ${normalizedRegion.height} VIEW / ${width} × ${height} FFT` : "FFT GRID / --" }}</span>
     </div>
-    <div class="forward-map-stage" :style="width > 0 && height > 0 ? { aspectRatio: `${width} / ${height}` } : undefined">
+    <div class="forward-map-stage" :style="{ aspectRatio: String(physicalAspectRatio) }">
       <canvas ref="canvas" aria-label="FFT-shifted simulated focal-plane intensity"></canvas>
+      <div v-if="visibleMarkers.length > 0" class="forward-target-markers" aria-hidden="true">
+        <i
+          v-for="marker in visibleMarkers"
+          :key="`${marker.label}:${marker.x}:${marker.y}`"
+          :style="{ left: marker.left, top: marker.top }"
+        ></i>
+      </div>
       <div v-if="running" class="canvas-compute-overlay" aria-hidden="true">
         <div class="field-orbits"><i></i><i></i><i></i><b></b></div>
         <span>FORWARD PROPAGATION / WORKER THREAD</span>
       </div>
-      <div class="canvas-label"><span>{{ status }}</span><span>FOCAL PLANE / NORMALIZED INTENSITY</span></div>
+      <div class="canvas-label"><span>{{ status }}</span><span>{{ viewLabel }} / NORMALIZED INTENSITY</span></div>
     </div>
     <div class="preview-footer">
       <span><small>ORIGIN</small> FFT-shifted center</span>
       <span><small>DISPLAY</small> {{ logarithmic ? `${floorDb} dB to 0 dB` : "Linear 0 to 1" }}</span>
-      <span><small>POOLING</small> Peak-preserving preview</span>
+      <span><small>GEOMETRY</small> Calibrated physical aspect</span>
     </div>
   </section>
 </template>

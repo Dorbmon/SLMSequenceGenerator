@@ -7,6 +7,7 @@ import {
   wasmNudftSampleTargets,
 } from "../../../src/index.js";
 import { decodeGrayscaleBmp, encodeGrayscaleBmp } from "./bmp.js";
+import { simulateSlmFrameWasm } from "./forward-simulation.js";
 import { createOpticalCalibration, parsePhaseResponseLut } from "./optical-calibration.js";
 
 const TAU = 2 * Math.PI;
@@ -78,6 +79,27 @@ describe("exact trap-domain Fourier regression", () => {
     expect(phaseError).toBeLessThan(0.015);
     expect(result.metrics.targetIntensityMean).toBeCloseTo(amplitude ** 2, 4);
     expect(result.metrics.maximumTargetPhaseErrorRad).toBeCloseTo(phaseError, 9);
+
+    const propagated = simulateSlmFrameWasm({
+      pixels: decoded.pixels,
+      width,
+      height,
+      fftWidth,
+      fftHeight,
+    });
+    const expectedX = Math.round(fftWidth / 2 + requestedFrequency.x);
+    const expectedY = Math.round(fftHeight / 2 + requestedFrequency.y);
+    const localPeak = maximumWindow(
+      propagated.intensity,
+      fftWidth,
+      fftHeight,
+      expectedX,
+      expectedY,
+      1,
+    );
+    expect(localPeak).toBeGreaterThan(0.95);
+    expect(Math.abs(propagated.metrics.peakX - expectedX)).toBeLessThanOrEqual(1);
+    expect(Math.abs(propagated.metrics.peakY - expectedY)).toBeLessThanOrEqual(1);
   });
 
   it("certifies the default four traps and retains the best exported BMP", () => {
@@ -209,6 +231,23 @@ function directCodeDft(
     }
   }
   return { real: sumReal, imag: sumImag };
+}
+
+function maximumWindow(
+  values: Float32Array,
+  width: number,
+  height: number,
+  centerX: number,
+  centerY: number,
+  radius: number,
+): number {
+  let maximum = 0;
+  for (let y = Math.max(0, centerY - radius); y <= Math.min(height - 1, centerY + radius); y += 1) {
+    for (let x = Math.max(0, centerX - radius); x <= Math.min(width - 1, centerX + radius); x += 1) {
+      maximum = Math.max(maximum, values[y * width + x]!);
+    }
+  }
+  return maximum;
 }
 
 function directComplexDft(

@@ -1,4 +1,5 @@
 import {
+  createForwardPhaseTable,
   finalizeForwardIntensity,
   validateForwardSimulationInput,
   type ForwardSimulationInput,
@@ -45,6 +46,7 @@ export async function simulateSlmFrameWebGpu(input: ForwardSimulationInput): Pro
       0,
     ]);
     const codes = Uint32Array.from(input.pixels);
+    const phaseTable = createForwardPhaseTable(input.phaseResponseLut);
     const parameterBuffer = device.createBuffer({
       label: "Forward simulation parameters",
       size: parameters.byteLength,
@@ -65,9 +67,15 @@ export async function simulateSlmFrameWebGpu(input: ForwardSimulationInput): Pro
       size: scalarBytes,
       usage: storage | GPUBufferUsage.COPY_SRC,
     });
-    buffers.push(parameterBuffer, codeBuffer, fieldBuffer, intensityBuffer);
+    const phaseTableBuffer = device.createBuffer({
+      label: "Forward simulation phase-response table",
+      size: phaseTable.byteLength,
+      usage: storage | copyDestination,
+    });
+    buffers.push(parameterBuffer, codeBuffer, fieldBuffer, intensityBuffer, phaseTableBuffer);
     device.queue.writeBuffer(parameterBuffer, 0, parameters.buffer as ArrayBuffer);
     device.queue.writeBuffer(codeBuffer, 0, codes.buffer as ArrayBuffer);
+    device.queue.writeBuffer(phaseTableBuffer, 0, phaseTable.buffer as ArrayBuffer);
 
     const forwardModule = device.createShaderModule({ label: "SLM forward propagation", code: FORWARD_SHADER });
     const [makeFieldPipeline, intensityPipeline] = await Promise.all([
@@ -89,6 +97,7 @@ export async function simulateSlmFrameWebGpu(input: ForwardSimulationInput): Pro
         { binding: 0, resource: { buffer: parameterBuffer } },
         { binding: 1, resource: { buffer: codeBuffer } },
         { binding: 2, resource: { buffer: fieldBuffer } },
+        { binding: 4, resource: { buffer: phaseTableBuffer } },
       ],
     });
     const intensityBindings = device.createBindGroup({
@@ -259,6 +268,7 @@ struct Parameters {
 @group(0) @binding(1) var<storage, read> codes: array<u32>;
 @group(0) @binding(2) var<storage, read_write> field: array<vec2<f32>>;
 @group(0) @binding(3) var<storage, read_write> intensity: array<f32>;
+@group(0) @binding(4) var<storage, read> phaseByCode: array<f32>;
 
 @compute @workgroup_size(${WORKGROUP_SIZE})
 fn make_field(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -271,7 +281,7 @@ fn make_field(@builtin(global_invocation_id) gid: vec3<u32>) {
     return;
   }
   let activeIndex = (y - params.yStart) * params.activeWidth + (x - params.xStart);
-  let phase = f32(codes[activeIndex]) / 255.0 * TAU - PI;
+  let phase = phaseByCode[codes[activeIndex]];
   field[index] = vec2<f32>(cos(phase), sin(phase));
 }
 

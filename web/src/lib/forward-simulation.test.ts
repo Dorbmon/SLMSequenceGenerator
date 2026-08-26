@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  decodeForwardPhaseCode,
+  forwardSimulationRegionAspect,
+  shiftedForwardCoordinate,
   simulateSlmFrameWasm,
+  targetForwardSimulationRegion,
   validateForwardSimulationInput,
 } from "./forward-simulation.js";
 
@@ -63,5 +67,29 @@ describe("SLM forward simulation", () => {
     expect(() => validateForwardSimulationInput({
       pixels: new Uint8Array(16), width: 4, height: 4, fftWidth: 6, fftHeight: 4,
     })).toThrow(/power-of-two/i);
+  });
+
+  it("decodes measured phase-response values instead of assuming a linear SLM", () => {
+    expect(decodeForwardPhaseCode(0, [0, 1, 6])).toBe(0);
+    expect(decodeForwardPhaseCode(255, [0, 1, 6])).toBe(6);
+    expect(decodeForwardPhaseCode(127.5, [0, 1, 6])).toBeCloseTo(1, 12);
+  });
+
+  it("builds a calibrated target view without stretching the physical field", () => {
+    const region = targetForwardSimulationRegion([
+      { x: -42, y: -2.5 },
+      { x: 42, y: 2.5 },
+    ], 2048, 1024, 1272, 1024);
+
+    expect(region).not.toBeNull();
+    expect(region!.x).toBeLessThan(1024 - 42);
+    expect(region!.x + region!.width).toBeGreaterThan(1024 + 42);
+    expect(region!.y).toBeLessThan(512 - 2.5);
+    expect(region!.y + region!.height).toBeGreaterThan(512 + 2.5);
+    expect(forwardSimulationRegionAspect(region!, 2048, 1024)).toBeGreaterThanOrEqual(1.5);
+    expect(forwardSimulationRegionAspect(region!, 2048, 1024)).toBeLessThanOrEqual(3);
+    expect(forwardSimulationRegionAspect({ x: 0, y: 0, width: 2048, height: 1024 }, 2048, 1024)).toBe(1);
+    expect(shiftedForwardCoordinate(1024, 2048)).toBe(0);
+    expect(shiftedForwardCoordinate(-1024, 2048)).toBe(0);
   });
 });

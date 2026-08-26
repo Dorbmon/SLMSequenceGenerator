@@ -9,6 +9,7 @@ import {
 } from "../../../src/index.js";
 import ComputationActivity from "../components/ComputationActivity.vue";
 import ForwardSimulator from "../components/ForwardSimulator.vue";
+import ManualTweezerDrawer from "../components/ManualTweezerDrawer.vue";
 import SlmFramePreview from "../components/SlmFramePreview.vue";
 import TargetImageImporter from "../components/TargetImageImporter.vue";
 import { encodeGrayscaleBmp } from "../lib/bmp.js";
@@ -54,6 +55,10 @@ interface TargetImageImporterHandle {
   reset(): void;
 }
 
+interface ManualTweezerDrawerHandle {
+  reset(): void;
+}
+
 interface ForwardSimulatorHandle {
   reset(): void;
 }
@@ -66,6 +71,7 @@ const props = defineProps<{
 const upload = ref<HTMLInputElement | null>(null);
 const calibrationUpload = ref<HTMLInputElement | null>(null);
 const targetImageImporter = ref<TargetImageImporterHandle | null>(null);
+const manualTweezerDrawer = ref<ManualTweezerDrawerHandle | null>(null);
 const forwardSimulator = ref<ForwardSimulatorHandle | null>(null);
 const tweezers = ref<OpticalTweezerInput[]>(cloneOpticalTweezers(DEFAULT_OPTICAL_TWEEZERS));
 const jsonDraft = ref(serializeOpticalTweezers(tweezers.value));
@@ -292,6 +298,7 @@ function reset(): void {
   nextTick(() => {
     suppressTableSync = false;
     targetImageImporter.value?.reset();
+    manualTweezerDrawer.value?.reset();
     forwardSimulator.value?.reset();
   });
 }
@@ -697,6 +704,19 @@ defineExpose({ reset });
           <div class="tweezer-plane-caption"><span>PHASE / HUE</span><span>UM PLANE / TOP VIEW</span></div>
         </div>
 
+        <div class="data-subbar target-image-subbar tweezer-manual-subbar">
+          <span>MANUAL INPUT / DRAW OPTICAL TWEEZERS</span>
+          <span>ARC-LENGTH SAMPLING / RESOLUTION SAFE</span>
+        </div>
+        <ManualTweezerDrawer
+          ref="manualTweezerDrawer"
+          :disabled="running"
+          :source-points="tweezers"
+          :minimum-separation-x-um="opticalResolution?.xUm ?? 0"
+          :minimum-separation-y-um="opticalResolution?.yUm ?? 0"
+          @apply="applyImageTweezers"
+        />
+
         <div class="data-subbar target-image-subbar tweezer-image-subbar">
           <span>IMAGE INPUT / OPTICAL TWEEZERS</span>
           <span>FOREGROUND FIT / RESOLUTION SAFE / FREE PHASE</span>
@@ -856,6 +876,8 @@ defineExpose({ reset });
       :generated-height="slmHeight"
       :webgpu-available="webgpuAvailable"
       :webgpu-status="webgpuStatus"
+      :targets="tweezers"
+      :optical-calibration="opticalCalibrationInput"
     />
   </section>
 </template>

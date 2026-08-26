@@ -1,15 +1,28 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, shallowRef, watch } from "vue";
+import { mapPhysicalPointToDftFrequency } from "../../../src/index.js";
 import ComputationActivity from "./ComputationActivity.vue";
 import IntensityMapPreview from "./IntensityMapPreview.vue";
 import { decodeGrayscaleBmp, encodeGrayscaleBmp } from "../lib/bmp.js";
+import {
+  forwardSimulationRegionAspect,
+  shiftedForwardCoordinate,
+  targetForwardSimulationRegion,
+  type ForwardSimulationMetrics,
+  type ForwardSimulationRegion,
+} from "../lib/forward-simulation.js";
+import type { OpticalCalibrationInput } from "../lib/optical-calibration.js";
+import {
+  createOpticalCalibration,
+  opticalFieldOfViewUm,
+} from "../lib/optical-calibration.js";
 import {
   MAX_SLM_DIMENSION,
   MIN_SLM_DIMENSION,
   fftDimensionFor,
   normalizeSlmDimension,
 } from "../lib/resolution.js";
-import type { ForwardSimulationMetrics } from "../lib/forward-simulation.js";
+import type { OpticalTweezerInput } from "../lib/tweezers.js";
 import type { ComputeBackend } from "../workers/compiler-messages.js";
 import type {
   ForwardSimulationWorkerRequest,
@@ -30,6 +43,8 @@ const props = defineProps<{
   generatedHeight: number;
   webgpuAvailable: boolean;
   webgpuStatus: string;
+  targets: readonly OpticalTweezerInput[];
+  opticalCalibration: OpticalCalibrationInput;
 }>();
 
 const upload = ref<HTMLInputElement | null>(null);
@@ -38,8 +53,9 @@ const intensity = shallowRef<Float32Array | null>(null);
 const metrics = shallowRef<ForwardSimulationMetrics | null>(null);
 const backend = ref<ComputeBackend>("wasm");
 const resultBackendId = ref("");
-const logarithmic = ref(true);
+const logarithmic = ref(false);
 const floorDb = ref(-60);
+const viewMode = ref<"TARGETS" | "FULL">("TARGETS");
 const running = ref(false);
 const dragging = ref(false);
 const elapsedMs = ref<number | null>(null);
@@ -60,9 +76,78 @@ const status = computed(() => {
 const canUseGenerated = computed(() => (
   props.generatedPixels !== null && props.generatedPixels.length === props.generatedWidth * props.generatedHeight
 ));
+const targetFrequencies = computed(() => {
+  const frame = loadedFrame.value;
+  if (!frame || props.targets.length === 0) return [];
+  try {
+    const calibration = createOpticalCalibration({
+      activeWidth: frame.width,
+      activeHeight: frame.height,
+      fftWidth: fftWidth.value,
+      fftHeight: fftHeight.value,
+    }, props.opticalCalibration, "browser-forward-simulation-calibration");
+    return props.targets.map((target) => mapPhysicalPointToDftFrequency(
+      target,
+      calibration,
+      fftWidth.value,
+      fftHeight.value,
+    ));
+  } catch {
+    return [];
+  }
+});
+const targetRegion = computed(() => {
+  const frame = loadedFrame.value;
+  if (!frame) return null;
+  return targetForwardSimulationRegion(
+    targetFrequencies.value,
+    fftWidth.value,
+    fftHeight.value,
+    frame.width,
+    frame.height,
+  );
+});
+const fullRegion = computed<ForwardSimulationRegion | null>(() => (
+  fftWidth.value > 0 && fftHeight.value > 0
+    ? { x: 0, y: 0, width: fftWidth.value, height: fftHeight.value }
+    : null
+));
+const displayRegion = computed(() => (
+  viewMode.value === "TARGETS" && targetRegion.value ? targetRegion.value : fullRegion.value
+));
+const displayAspectRatio = computed(() => {
+  const region = displayRegion.value;
+  return region ? forwardSimulationRegionAspect(region, fftWidth.value, fftHeight.value) : 16 / 9;
+});
+const targetMarkers = computed(() => targetFrequencies.value.map((frequency, index) => ({
+  x: shiftedForwardCoordinate(frequency.x, fftWidth.value),
+  y: shiftedForwardCoordinate(frequency.y, fftHeight.value),
+  label: String(props.targets[index]?.trapId ?? index + 1),
+})));
+const displayFieldSummary = computed(() => {
+  const region = displayRegion.value;
+  if (!region) return "--";
+  try {
+    const fieldOfView = opticalFieldOfViewUm(props.opticalCalibration);
+    const widthUm = region.width / fftWidth.value * fieldOfView;
+    const heightUm = region.height / fftHeight.value * fieldOfView;
+    return `${widthUm.toFixed(2)} × ${heightUm.toFixed(2)} µm`;
+  } catch {
+    return `${region.width} × ${region.height} bins`;
+  }
+});
 
 watch(() => props.webgpuAvailable, (available) => {
   if (!available && backend.value === "webgpu") backend.value = "wasm";
+});
+watch(() => props.generatedPixels, (generated) => {
+  if (generated !== null || loadedFrame.value?.source !== "GENERATED") return;
+  cancelSimulation(false);
+  loadedFrame.value = null;
+  intensity.value = null;
+  metrics.value = null;
+  resultBackendId.value = "";
+  elapsedMs.value = null;
 });
 
 async function loadFrame(event: Event): Promise<void> {
@@ -121,6 +206,7 @@ function setLoadedFrame(frame: LoadedFrame): void {
   resultBackendId.value = "";
   elapsedMs.value = null;
   errorMessage.value = "";
+  viewMode.value = props.targets.length > 0 ? "TARGETS" : "FULL";
 }
 
 function validateFrameDimensions(width: number, height: number): void {
@@ -170,6 +256,9 @@ function simulate(): void {
       fftWidth: fftWidth.value,
       fftHeight: fftHeight.value,
       backend: backend.value,
+      ...(props.opticalCalibration.phaseResponseLut
+        ? { phaseResponseLut: [...props.opticalCalibration.phaseResponseLut] }
+        : {}),
     },
   };
   nextWorker.postMessage(request, [request.input.pixels]);
@@ -282,8 +371,9 @@ function reset(): void {
   metrics.value = null;
   backend.value = "wasm";
   resultBackendId.value = "";
-  logarithmic.value = true;
+  logarithmic.value = false;
   floorDb.value = -60;
+  viewMode.value = "TARGETS";
   elapsedMs.value = null;
   errorMessage.value = "";
   dragging.value = false;
@@ -348,6 +438,13 @@ defineExpose({ reset });
         </label>
 
         <div class="forward-display-controls">
+          <label>FOCAL-PLANE VIEW
+            <select v-model="viewMode">
+              <option value="TARGETS" :disabled="!targetRegion">Current target region</option>
+              <option value="FULL">Full optical field</option>
+            </select>
+          </label>
+          <p class="forward-view-summary">{{ viewMode === "TARGETS" && targetRegion ? `${targetMarkers.length} TARGETS / ${displayFieldSummary}` : `FULL FIELD / ${displayFieldSummary}` }}</p>
           <label>INTENSITY DISPLAY
             <select v-model="logarithmic">
               <option :value="true">Logarithmic / dB</option>
@@ -375,7 +472,7 @@ defineExpose({ reset });
           <button type="button" :disabled="!intensity || running" @click="exportIntensityBmp">Display BMP <b>&darr;</b></button>
           <button type="button" :disabled="!intensity || running" @click="exportIntensityRaw">Normalized F32 <b>&darr;</b></button>
         </div>
-        <p class="forward-model-note">MODEL / LINEAR 0–2π RESPONSE · UNIFORM ILLUMINATION · NO MEASURED ABERRATION</p>
+        <p class="forward-model-note">MODEL / {{ opticalCalibration.phaseResponseLut ? "MEASURED PHASE-RESPONSE LUT" : "LINEAR 0–2π RESPONSE" }} · UNIFORM ILLUMINATION · NO MEASURED ABERRATION</p>
       </div>
 
       <IntensityMapPreview
@@ -386,6 +483,10 @@ defineExpose({ reset });
         :status="status"
         :logarithmic="logarithmic"
         :floor-db="floorDb"
+        :region="displayRegion"
+        :target-markers="viewMode === 'TARGETS' ? targetMarkers : []"
+        :physical-aspect-ratio="displayAspectRatio"
+        :view-label="viewMode === 'TARGETS' && targetRegion ? 'CALIBRATED TARGET REGION' : 'FULL OPTICAL FIELD'"
       />
     </div>
 

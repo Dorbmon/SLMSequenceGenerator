@@ -8,6 +8,7 @@ export interface ForwardSimulationWorkerInput {
   fftWidth: number;
   fftHeight: number;
   backend: ComputeBackend;
+  phaseResponseLut?: number[];
 }
 
 export type ForwardSimulationWorkerRequest = {

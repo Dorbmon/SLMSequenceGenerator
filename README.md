@@ -52,7 +52,12 @@ replace the target JSON.
 
 The `/tweezers` workspace generates a single SLM frame directly from optical
 tweezer coordinates, requested phases, and relative intensities. Inputs can be
-edited in the table or as JSON. It also accepts target-field images in two
+edited in the table or as JSON. A freehand focal-plane editor can draw or erase
+trap paths, undo gestures, and load the current coordinates for revision. It
+samples pointer paths by physical arc length rather than browser event rate and
+rejects crossings or retraced samples inside the calibrated optical-resolution
+limit. Applied drawings continue through the existing table and JSON model.
+The workspace also accepts target-field images in two
 modes: isolated-spot mode converts connected components to centroids, while
 image-pattern mode samples text and other connected shapes into a spatially
 uniform point cloud. Optical-tweezer imports discard sparse edge bins, fit the
@@ -65,7 +70,12 @@ can be downloaded as raw pixels, a standards-compatible grayscale BMP, or with
 its JSON metadata. A forward-simulation panel accepts the exported indexed BMP
 or a raw U8 phase-code frame, applies the same uniform active aperture and
 centered power-of-two FFT model in a dedicated worker, and renders the
-FFT-shifted focal-plane intensity on a linear or adjustable decibel scale. The
+FFT-shifted focal-plane intensity on a linear or adjustable decibel scale. When
+current target coordinates are available, the preview opens on a calibrated
+target-region crop, marks the requested positions, and uses physical focal-plane
+aspect instead of the generally non-square FFT pixel aspect. The full optical
+field remains selectable. Measured display-code phase LUTs are honored by both
+the Wasm and WebGPU forward paths. The
 normalized intensity field can also be exported as a display BMP or Float32
 raw array. Forward propagation supports both Wasm and a GPU-resident WebGPU
 path.
