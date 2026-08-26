@@ -1227,8 +1227,8 @@ fn wrapped_dft_cycles(position: f32, coordinate: u32, extent: u32) -> f32 {
   return (f32(modular) + fractional * f32(coordinate)) / f32(extent);
 }
 
-fn initialization_phase(index: u32) -> f32 {
-  var value = (index ^ params.deterministicSeed) + 1u;
+fn deterministic_phase(key: u32) -> f32 {
+  var value = (key ^ params.deterministicSeed) + 1u;
   value = (value ^ (value >> 16u)) * 0x7feb352du;
   value = (value ^ (value >> 15u)) * 0x846ca68bu;
   value = value ^ (value >> 16u);
@@ -1241,6 +1241,9 @@ fn initialize_targets(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (index >= params.targetCount) { return; }
   var initialWeight = 1.0;
   var persistentPhase = targetInputs[index].inputPhase;
+  if (params.phaseMode == 0u) {
+    persistentPhase = deterministic_phase(targetInputs[index].id);
+  }
   var synthesisPhase = persistentPhase;
   if (params.hasAccepted == 1u) {
     for (var previous = 0u; previous < params.acceptedTargetCount; previous = previous + 1u) {
@@ -1293,12 +1296,12 @@ fn initialize_phase(@builtin(global_invocation_id) gid: vec3<u32>) {
     let item = targetInputs[targetIndex];
     let cycles = wrapped_dft_cycles(item.position.x, index % params.width, params.width)
       + wrapped_dft_cycles(item.position.y, index / params.width, params.height);
-    let angle = wrap_phase(TAU * cycles + item.inputPhase);
+    let angle = wrap_phase(TAU * cycles + targetStates[targetIndex].synthesisPhase);
     sum = sum + item.desired * vec2<f32>(cos(angle), sin(angle));
     coherentAmplitude = coherentAmplitude + item.desired;
   }
   let cancellationThreshold = max(params.epsilon, coherentAmplitude * ${WGS_INITIALIZATION_CANCELLATION_RATIO});
-  phase[index] = select(atan2(sum.y, sum.x), initialization_phase(index), length(sum) <= cancellationThreshold);
+  phase[index] = select(atan2(sum.y, sum.x), deterministic_phase(index), length(sum) <= cancellationThreshold);
 }
 
 @compute @workgroup_size(${WORKGROUP_SIZE})

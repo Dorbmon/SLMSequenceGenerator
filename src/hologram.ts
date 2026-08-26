@@ -32,6 +32,20 @@ export const WGS_REFERENCE_TRAP_AMPLITUDE_GAIN = 0.85;
 export const WGS_LOCKED_PHASE_PRECOMPENSATION_GAIN = 0.7;
 export const WGS_SOFT_PHASE_PRECOMPENSATION_GAIN = 0.2;
 
+/**
+ * Stable pseudo-random target phase used only when the requested target is
+ * intensity-only. A random target-plane phase is the standard GS starting
+ * condition; hashing the trap id keeps exports reproducible and lets CPU and
+ * WebGPU start from the same family of non-coherent solutions.
+ */
+export function deterministicReferenceTargetPhase(trapId: number, seed: number): number {
+  let value = (((trapId >>> 0) ^ (seed >>> 0)) + 1) >>> 0;
+  value = Math.imul(value ^ (value >>> 16), 0x7feb352d) >>> 0;
+  value = Math.imul(value ^ (value >>> 15), 0x846ca68b) >>> 0;
+  value = (value ^ (value >>> 16)) >>> 0;
+  return (value >>> 8) / 16_777_216 * TAU - Math.PI;
+}
+
 interface SolverState {
   phase: Float64Array;
   weights: Map<number, number>;
@@ -112,9 +126,11 @@ export class SequentialWgsSolver {
     const weights = new Map<number, number>();
     for (const trap of frame.traps) {
       const previousTargetPhase = previous?.targetPhases.get(trap.trapId);
-      const requestedTargetPhase = this.config.targetPhaseMode === "PHASE_INTERPOLATED_WGS"
-        ? trap.targetPhaseRad
-        : previousTargetPhase ?? trap.targetPhaseRad;
+      const requestedTargetPhase = this.config.targetPhaseMode === "REFERENCE_WGS"
+        ? previousTargetPhase ?? deterministicReferenceTargetPhase(trap.trapId, this.config.deterministicSeed)
+        : this.config.targetPhaseMode === "PHASE_INTERPOLATED_WGS"
+          ? trap.targetPhaseRad
+          : previousTargetPhase ?? trap.targetPhaseRad;
       targetPhases.set(trap.trapId, requestedTargetPhase);
       const previousSynthesisPhase = previous?.synthesisPhases.get(trap.trapId);
       synthesisPhases.set(
@@ -127,7 +143,7 @@ export class SequentialWgsSolver {
     }
     let phase = previous
       ? new Float64Array(previous.phase)
-      : this.initializeSuperposition(frame, targetX, targetY);
+      : this.initializeSuperposition(frame, targetX, targetY, synthesisPhases);
     const iterations = Math.min(
       Math.max(1, iterationBudget ?? (previous ? this.config.subsequentFrameIterations : this.config.firstFrameIterations)),
       this.config.maxIterations,
@@ -313,11 +329,15 @@ export class SequentialWgsSolver {
     frame: TrapFrame,
     targetX: Float64Array,
     targetY: Float64Array,
+    synthesisPhases: ReadonlyMap<number, number>,
   ): Float64Array {
     const phase = new Float64Array(this.width * this.height);
     if (frame.traps.length === 0) return phase;
     const amplitudes = Float64Array.from(frame.traps, (trap) => Math.sqrt(Math.max(0, trap.intensity)));
-    const phases = Float64Array.from(frame.traps, (trap) => trap.targetPhaseRad);
+    const phases = Float64Array.from(
+      frame.traps,
+      (trap) => synthesisPhases.get(trap.trapId) ?? trap.targetPhaseRad,
+    );
     const coherentAmplitude = amplitudes.reduce((sum, amplitude) => sum + amplitude, 0);
     const cancellationThreshold = Math.max(
       this.config.epsilon,

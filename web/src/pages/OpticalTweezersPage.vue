@@ -22,6 +22,7 @@ import {
   DEFAULT_TWO_PI_SIGNAL_LEVEL,
   DEFAULT_WAVELENGTH_NM,
   opticalFieldOfViewUm,
+  opticalImageFieldSizeUm,
   opticalEffectiveResolutionUm,
   phaseResponseForTwoPiSignalLevel,
   parsePhaseResponseLut,
@@ -85,6 +86,7 @@ const slmHeight = ref(DEFAULT_SLM_HEIGHT);
 const iterations = ref(4);
 const computeBackend = ref<ComputeBackend>("wasm");
 const targetPhaseMode = ref<TweezerTargetPhaseMode>("PHASE_LOCKED_WGS");
+const referencePhaseSeed = ref(1);
 const amplitudeTolerancePercent = ref(0.01);
 const wavelengthNm = ref(DEFAULT_WAVELENGTH_NM);
 const focalLengthMm = ref(DEFAULT_FOCAL_LENGTH_MM);
@@ -143,6 +145,18 @@ const fieldOfViewUm = computed(() => {
     return null;
   }
 });
+const imageFieldSizeUm = computed(() => {
+  try {
+    return opticalImageFieldSizeUm({
+      fftWidth: fftWidth.value,
+      fftHeight: fftHeight.value,
+    }, opticalCalibrationInput.value);
+  } catch {
+    return null;
+  }
+});
+const imageFieldWidthUm = computed(() => imageFieldSizeUm.value?.xUm);
+const imageFieldHeightUm = computed(() => imageFieldSizeUm.value?.yUm);
 const opticalResolution = computed(() => {
   try {
     return opticalEffectiveResolutionUm({
@@ -306,6 +320,7 @@ function reset(): void {
   iterations.value = 4;
   computeBackend.value = "wasm";
   targetPhaseMode.value = "PHASE_LOCKED_WGS";
+  referencePhaseSeed.value = 1;
   amplitudeTolerancePercent.value = 0.01;
   wavelengthNm.value = DEFAULT_WAVELENGTH_NM;
   focalLengthMm.value = DEFAULT_FOCAL_LENGTH_MM;
@@ -368,6 +383,15 @@ function updateComputeBackend(event: Event): void {
 
 function updateTargetPhaseMode(event: Event): void {
   targetPhaseMode.value = (event.target as HTMLSelectElement).value as TweezerTargetPhaseMode;
+  invalidateOutput();
+}
+
+function updateReferencePhaseSeed(): void {
+  if (!validReferencePhaseSeed(referencePhaseSeed.value)) {
+    errorMessage.value = "Free-phase seed must be an integer from 0 to 4294967295";
+    outputState.value = "rejected";
+    return;
+  }
   invalidateOutput();
 }
 
@@ -450,6 +474,9 @@ function generateFrame(): void {
   if (!input) return;
   let calibration: CalibrationPackage;
   try {
+    if (!validReferencePhaseSeed(referencePhaseSeed.value)) {
+      throw new Error("Free-phase seed must be an integer from 0 to 4294967295");
+    }
     if (lutApplicationMode.value === "BROWSER" && !phaseResponseLut.value) {
       phaseResponseForTwoPiSignalLevel(twoPiSignalLevel.value);
     }
@@ -532,6 +559,7 @@ function generateFrame(): void {
       fftHeight: fftHeight.value,
       iterations: iterations.value,
       targetPhaseMode: targetPhaseMode.value,
+      deterministicSeed: referencePhaseSeed.value,
       convergenceTolerance: amplitudeTolerancePercent.value / 100,
       backend: computeBackend.value,
       opticalCalibration: opticalCalibrationInput.value,
@@ -545,6 +573,10 @@ function updateAmplitudeToleranceValue(): void {
       amplitudeTolerancePercent.value <= 0 || amplitudeTolerancePercent.value > 100) {
     throw new Error("Amplitude certificate tolerance must be greater than 0% and no more than 100%");
   }
+}
+
+function validReferencePhaseSeed(value: number): boolean {
+  return Number.isSafeInteger(value) && value >= 0 && value <= 0xffff_ffff;
 }
 
 function convergenceWarning(metric: FrameMetrics): string {
@@ -664,6 +696,10 @@ function exportMetadata(): void {
       backend: resultBackendId.value,
       requestedIterations: iterations.value,
       targetPhaseMode: targetPhaseMode.value,
+      deterministicSeed: referencePhaseSeed.value,
+      targetPhaseInitialization: targetPhaseMode.value === "REFERENCE_WGS"
+        ? "deterministic pseudo-random phase per trap"
+        : "explicit table / JSON phase",
       amplitudeConvergenceTolerance: amplitudeTolerancePercent.value / 100,
       backgroundPolicy: "ZERO",
       effectiveAmplitudeFeedbackGain: targetPhaseMode.value === "REFERENCE_WGS"
@@ -789,7 +825,7 @@ defineExpose({ reset });
 
         <div class="data-subbar target-image-subbar tweezer-image-subbar">
           <span>IMAGE INPUT / OPTICAL TWEEZERS</span>
-          <span>FOREGROUND FIT / RESOLUTION SAFE / FREE PHASE</span>
+          <span>FULL CANVAS / CALIBRATED FOURIER FOV / FREE PHASE</span>
         </div>
         <TargetImageImporter
           ref="targetImageImporter"
@@ -797,6 +833,8 @@ defineExpose({ reset });
           :disabled="running"
           :minimum-separation-x-um="opticalResolution?.xUm ?? 0"
           :minimum-separation-y-um="opticalResolution?.yUm ?? 0"
+          :optical-field-width-um="imageFieldWidthUm"
+          :optical-field-height-um="imageFieldHeightUm"
           @apply="applyImageTweezers"
         />
 
@@ -929,6 +967,10 @@ defineExpose({ reset });
                 <option value="REFERENCE_WGS">Free phase / intensity-only target</option>
               </select>
               <small>{{ targetPhaseMode === "REFERENCE_WGS" ? "OUTPUT PHASES FLOAT TO IMPROVE PATTERN UNIFORMITY" : "EVERY REQUESTED PHASE IS INCLUDED IN CERTIFICATION" }}</small>
+            </label>
+            <label v-if="targetPhaseMode === 'REFERENCE_WGS'" class="tweezer-backend-choice tweezer-certificate-choice">FREE-PHASE SPECKLE SEED
+              <input v-model.number="referencePhaseSeed" type="number" min="0" max="4294967295" step="1" :disabled="running" @change="updateReferencePhaseSeed">
+              <small>DETERMINISTIC RANDOM TARGET PHASES / CHANGING THE SEED SELECTS ANOTHER EQUIVALENT CGH</small>
             </label>
             <label class="tweezer-backend-choice tweezer-certificate-choice">MAX AMPLITUDE ERROR / %
               <input v-model.number="amplitudeTolerancePercent" type="number" min="0.0001" max="100" step="0.01" :disabled="running" @change="updateAmplitudeTolerance">

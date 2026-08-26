@@ -151,6 +151,34 @@ describe("target-field image detection", () => {
     )).toEqual({ widthUm: 50, heightUm: 10 });
   });
 
+  it("preserves an off-axis image placement when the full canvas is mapped", () => {
+    const detections = [point(40, 18, 20), point(60, 22, 30)];
+    const fullCanvas = mapImagePointsToField(detections, 101, 101, 400, 400);
+    const recentered = mapImagePointsToField(
+      detections,
+      101,
+      101,
+      400,
+      400,
+      imagePointBounds(detections)!,
+    );
+
+    expect(fullCanvas.map(({ xUm, yUm }) => ({ xUm, yUm }))).toEqual([
+      { xUm: -40, yUm: 128 },
+      { xUm: 40, yUm: 112 },
+    ]);
+    expect(recentered.map(({ xUm, yUm }) => ({ xUm, yUm }))).toEqual([
+      { xUm: -200, yUm: 200 },
+      { xUm: 200, yUm: -200 },
+    ]);
+
+    const shifted = mapImagePointsToField(detections, 101, 101, 400, 400, undefined, 25, -50);
+    expect(shifted.map(({ xUm, yUm }) => ({ xUm, yUm }))).toEqual([
+      { xUm: -15, yUm: 78 },
+      { xUm: 65, yUm: 62 },
+    ]);
+  });
+
   it("keeps the strongest representative from an unresolved cluster", () => {
     const candidates = [
       { ...point(1, 1, 10), xUm: 0, yUm: 0 },

@@ -98,6 +98,16 @@ rejects unresolved trap pairs before computation, and exposes the maximum
 relative-amplitude error used by its certificate. Image patterns select a 10%
 limit by default; manually entered complex-field targets retain the strict
 0.01% default, and either value can be changed explicitly.
+Image-pattern import preserves the full source canvas by default so an
+intentionally off-axis pattern is not silently recentered onto the undiffracted
+zero order. It also maps that canvas across the calibrated non-aliased Fourier
+field by default (about 3254 × 3253 µm for the current 407 nm / 100 mm / 12.5 µm
+preset), matching image-CGH pixel scaling instead of shrinking the entire image
+to the smallest resolvable trap cloud. Compact resolution-safe and manual field
+sizes, plus foreground crop/recenter, remain explicit options.
+Editable field-centre offsets and a central zero-order guard warning make an
+intentional off-axis carrier placement explicit before the point cloud is
+applied.
 
 Browser calculations run in a dedicated Web Worker. The interface, progress
 animations, navigation, and elapsed-time display remain responsive while Wasm
@@ -119,7 +129,11 @@ after quantization for full-plane power and ghost diagnostics, followed by one
 cropped-frame/metrics readback.
 WebGPU support is checked inside the same dedicated worker that performs the
 computation. Both backends use the same range-reduced, seeded initialization
-when target phasors destructively cancel. Frames that exhaust their WGS budget
+when target phasors destructively cancel. Intensity-only/free-phase targets use
+the same deterministic pseudo-random target-plane phase initialization on Wasm
+and WebGPU, avoiding the large coherent phase domains produced by starting every
+image point at zero phase. The seed is editable and recorded in exported
+metadata. Frames that exhaust their WGS budget
 remain exportable but are shown as a non-convergence warning instead of a
 verified acceptance.
 

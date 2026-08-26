@@ -354,6 +354,8 @@ export function mapImagePointsToField(
   fieldWidthUm: number,
   fieldHeightUm: number,
   sourceBounds?: ImagePointBoundsPx,
+  fieldCenterXUm = 0,
+  fieldCenterYUm = 0,
 ): PhysicalImagePoint[] {
   if (!Number.isFinite(fieldWidthUm) || fieldWidthUm <= 0 || !Number.isFinite(fieldHeightUm) || fieldHeightUm <= 0) {
     throw new Error("Image field width and height must be positive finite values");
@@ -361,14 +363,17 @@ export function mapImagePointsToField(
   if (!Number.isInteger(imageWidth) || imageWidth <= 0 || !Number.isInteger(imageHeight) || imageHeight <= 0) {
     throw new Error("Image dimensions must be positive integers");
   }
+  if (!Number.isFinite(fieldCenterXUm) || !Number.isFinite(fieldCenterYUm)) {
+    throw new Error("Image field centre must contain finite coordinates");
+  }
   const bounds = sourceBounds ?? { minX: 0, maxX: imageWidth - 1, minY: 0, maxY: imageHeight - 1 };
   validateBounds(bounds, imageWidth, imageHeight);
   const xSpan = Math.max(1, bounds.maxX - bounds.minX);
   const ySpan = Math.max(1, bounds.maxY - bounds.minY);
   return points.map((point) => ({
     ...point,
-    xUm: roundCoordinate(((point.xPx - bounds.minX) / xSpan - 0.5) * fieldWidthUm),
-    yUm: roundCoordinate((0.5 - (point.yPx - bounds.minY) / ySpan) * fieldHeightUm),
+    xUm: roundCoordinate(fieldCenterXUm + ((point.xPx - bounds.minX) / xSpan - 0.5) * fieldWidthUm),
+    yUm: roundCoordinate(fieldCenterYUm + (0.5 - (point.yPx - bounds.minY) / ySpan) * fieldHeightUm),
   }));
 }
 

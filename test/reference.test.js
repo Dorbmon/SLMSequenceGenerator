@@ -6,6 +6,7 @@ import {
   createComplexField,
   createSequencePackage,
   decodeTrapFrames,
+  deterministicReferenceTargetPhase,
   fft1d,
   fft2d,
   getWasmCoreInfo,
@@ -223,6 +224,50 @@ test("uses full WGS amplitude feedback when target phases are free", () => {
   assert.ok(normal.metrics.maximumRelativeAmplitudeError < conservative.metrics.maximumRelativeAmplitudeError / 2);
   assert.equal(normal.metrics.maximumTargetPhaseErrorRad, 0);
   assert.deepEqual(defaultReference.pixels, tunedReference.pixels);
+});
+
+test("free-phase WGS starts from reproducible incoherent target phases", () => {
+  const width = 64;
+  const referenceCalibration = calibration(width, width);
+  referenceCalibration.coordinateTransform = {
+    originXUm: width / 2,
+    originYUm: width / 2,
+    scaleX: 1,
+    scaleY: 1,
+  };
+  const frame = (phaseOffset) => ({
+    frameIndex: 0,
+    timeUs: 0,
+    traps: Array.from({ length: 12 }, (_, index) => ({
+      trapId: index + 1,
+      atomId: null,
+      xUm: 4 + (index % 6) * 5,
+      yUm: 9 + Math.floor(index / 6) * 13,
+      intensity: 1,
+      targetPhaseRad: phaseOffset + index * 0.17,
+      flags: 0,
+    })),
+  });
+  const solve = (seed, phaseOffset) => new SequentialWgsSolver(referenceCalibration, {
+    width,
+    height: width,
+    firstFrameIterations: 3,
+    maxIterations: 3,
+    targetPhaseMode: "REFERENCE_WGS",
+    deterministicSeed: seed,
+    backgroundPolicy: "ZERO",
+    requireConvergence: false,
+  }).solveSequentialFrame(frame(phaseOffset));
+
+  const first = solve(17, 0);
+  const repeated = solve(17, 2.4);
+  const anotherSpeckleRealization = solve(18, 0);
+
+  assert.deepEqual(first.pixels, repeated.pixels);
+  assert.notDeepEqual(first.pixels, anotherSpeckleRealization.pixels);
+  const phases = Array.from({ length: 12 }, (_, index) => deterministicReferenceTargetPhase(index + 1, 17));
+  assert.ok(phases.every((phase) => phase >= -Math.PI && phase < Math.PI));
+  assert.ok(new Set(phases.map((phase) => phase.toFixed(8))).size > 10);
 });
 
 test("uses a seeded stable phase when the initial target superposition cancels", () => {

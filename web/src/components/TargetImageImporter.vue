@@ -24,12 +24,15 @@ interface ImportedTargetPoint {
 }
 
 type ImageIntensityMode = "UNIFORM" | "IMAGE_BRIGHTNESS";
+type FieldScaleMode = "OPTICAL_FOV" | "RESOLUTION_SAFE" | "MANUAL";
 
 const props = withDefaults(defineProps<{
   disabled: boolean;
   destination?: "targets" | "tweezers";
   minimumSeparationXUm?: number;
   minimumSeparationYUm?: number;
+  opticalFieldWidthUm?: number | undefined;
+  opticalFieldHeightUm?: number | undefined;
 }>(), {
   destination: "targets",
   minimumSeparationXUm: 0,
@@ -53,10 +56,14 @@ const analysisWidth = ref(0);
 const analysisHeight = ref(0);
 const fieldWidthUm = ref(20);
 const fieldHeightUm = ref(20);
+const fieldCenterXUm = ref(0);
+const fieldCenterYUm = ref(0);
 const extractionMode = ref<ImageExtractionMode>(props.destination === "tweezers" ? "PATTERN" : "CENTROIDS");
 const intensityMode = ref<ImageIntensityMode>(props.destination === "tweezers" ? "UNIFORM" : "IMAGE_BRIGHTNESS");
-const fitForeground = ref(props.destination === "tweezers");
-const autoScaleField = ref(props.destination === "tweezers");
+// Keep the image's original placement by default. Recentring the foreground
+// onto (0, 0) overlaps the reconstructed pattern with undiffracted zero order.
+const fitForeground = ref(false);
+const fieldScaleMode = ref<FieldScaleMode>(props.destination === "tweezers" ? "OPTICAL_FOV" : "MANUAL");
 const thresholdPercent = ref(props.destination === "tweezers" ? 20 : 62);
 const minimumAreaPx = ref(3);
 const maximumPoints = ref(props.destination === "tweezers" ? 128 : 256);
@@ -88,6 +95,8 @@ const mappingValid = computed(() => (
   && fieldWidthUm.value > 0
   && Number.isFinite(fieldHeightUm.value)
   && fieldHeightUm.value > 0
+  && Number.isFinite(fieldCenterXUm.value)
+  && Number.isFinite(fieldCenterYUm.value)
 ));
 const foregroundBounds = computed<ImagePointBoundsPx | null>(() => imagePointBounds(
   detections.value,
@@ -105,6 +114,8 @@ const mappedImagePoints = computed(() => {
     fieldWidthUm.value,
     fieldHeightUm.value,
     mappingBounds.value,
+    fieldCenterXUm.value,
+    fieldCenterYUm.value,
   );
 });
 const resolvablePoints = computed(() => (
@@ -131,6 +142,18 @@ const preparedPoints = computed<ImportedTargetPoint[]>(() => {
       : Math.max(0.001, pointBrightness(point) / maximumSignal),
   }));
 });
+const zeroOrderClearanceUm = computed(() => preparedPoints.value.length === 0
+  ? Number.POSITIVE_INFINITY
+  : Math.min(...preparedPoints.value.map((point) => Math.hypot(point.xUm, point.yUm))));
+const zeroOrderGuardUm = computed(() => 1.5 * Math.max(
+  positiveFiniteOrUndefined(props.minimumSeparationXUm) ?? 0,
+  positiveFiniteOrUndefined(props.minimumSeparationYUm) ?? 0,
+));
+const overlapsZeroOrder = computed(() => (
+  props.destination === "tweezers"
+  && zeroOrderGuardUm.value > 0
+  && zeroOrderClearanceUm.value < zeroOrderGuardUm.value
+));
 const analysisWasReduced = computed(() => (
   sourceWidth.value !== analysisWidth.value || sourceHeight.value !== analysisHeight.value
 ));
@@ -208,6 +231,8 @@ async function loadImage(file: File): Promise<void> {
   running.value = true;
   errorMessage.value = "";
   appliedCount.value = null;
+  fieldCenterXUm.value = 0;
+  fieldCenterYUm.value = 0;
   sourceCanvas = null;
   imageName.value = "";
   sourceWidth.value = 0;
@@ -250,8 +275,8 @@ async function loadImage(file: File): Promise<void> {
     analysisWidth.value = width;
     analysisHeight.value = height;
     imageName.value = file.name;
-    fieldWidthUm.value = 20;
-    fieldHeightUm.value = roundedFieldSize(20 * height / width);
+  fieldWidthUm.value = 20;
+  fieldHeightUm.value = roundedFieldSize(20 * height / width);
     sourceCanvas = nextSource;
     await nextTick();
     drawPreview();
@@ -399,10 +424,12 @@ function reset(): void {
   draggingOver.value = false;
   errorMessage.value = "";
   appliedCount.value = null;
+  fieldCenterXUm.value = 0;
+  fieldCenterYUm.value = 0;
   extractionMode.value = props.destination === "tweezers" ? "PATTERN" : "CENTROIDS";
   intensityMode.value = props.destination === "tweezers" ? "UNIFORM" : "IMAGE_BRIGHTNESS";
-  fitForeground.value = props.destination === "tweezers";
-  autoScaleField.value = props.destination === "tweezers";
+  fitForeground.value = false;
+  fieldScaleMode.value = props.destination === "tweezers" ? "OPTICAL_FOV" : "MANUAL";
   thresholdPercent.value = props.destination === "tweezers" ? 20 : 62;
   minimumAreaPx.value = 3;
   maximumPoints.value = props.destination === "tweezers" ? 128 : 256;
@@ -417,7 +444,15 @@ function reset(): void {
 }
 
 function applyAutomaticFieldSize(): void {
-  if (!autoScaleField.value || extractionMode.value !== "PATTERN") return;
+  if (fieldScaleMode.value === "MANUAL" || extractionMode.value !== "PATTERN") return;
+  if (fieldScaleMode.value === "OPTICAL_FOV") {
+    if (positiveFiniteOrUndefined(props.opticalFieldWidthUm) !== undefined &&
+        positiveFiniteOrUndefined(props.opticalFieldHeightUm) !== undefined) {
+      fieldWidthUm.value = roundedFieldSize(props.opticalFieldWidthUm!);
+      fieldHeightUm.value = roundedFieldSize(props.opticalFieldHeightUm!);
+    }
+    return;
+  }
   const bounds = mappingBounds.value ?? (analysisWidth.value > 0 && analysisHeight.value > 0 ? {
     minX: 0,
     maxX: analysisWidth.value - 1,
@@ -437,8 +472,12 @@ function applyAutomaticFieldSize(): void {
 }
 
 function useManualFieldScale(): void {
-  autoScaleField.value = false;
+  fieldScaleMode.value = "MANUAL";
   appliedCount.value = null;
+}
+
+function positiveFiniteOrUndefined(value: number | undefined): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
 function pointBrightness(point: Pick<DetectedImagePoint, "integratedSignal" | "areaPx">): number {
@@ -462,11 +501,18 @@ function roundedFieldSize(value: number): number {
 }
 
 watch([extractionMode, thresholdPercent, minimumAreaPx, maximumPoints, patternSpacingPx, polarity], scheduleDetection);
-watch([intensityMode, fieldWidthUm, fieldHeightUm], () => {
+watch([intensityMode, fieldWidthUm, fieldHeightUm, fieldCenterXUm, fieldCenterYUm], () => {
   appliedCount.value = null;
   drawPreview();
 });
-watch([fitForeground, autoScaleField, () => props.minimumSeparationXUm, () => props.minimumSeparationYUm], () => {
+watch([
+  fitForeground,
+  fieldScaleMode,
+  () => props.minimumSeparationXUm,
+  () => props.minimumSeparationYUm,
+  () => props.opticalFieldWidthUm,
+  () => props.opticalFieldHeightUm,
+], () => {
   applyAutomaticFieldSize();
   appliedCount.value = null;
   drawPreview();
@@ -543,15 +589,16 @@ defineExpose({ reset });
 
         <label v-if="extractionMode === 'PATTERN'">PATTERN BOUNDS
           <select v-model="fitForeground" :disabled="disabled">
-            <option :value="true">Fit detected foreground</option>
-            <option :value="false">Keep full image canvas</option>
+            <option :value="false">Preserve full canvas position (recommended)</option>
+            <option :value="true">Crop + recenter foreground</option>
           </select>
         </label>
 
         <label v-if="extractionMode === 'PATTERN' && destination === 'tweezers'">PHYSICAL SCALE
-          <select v-model="autoScaleField" :disabled="disabled">
-            <option :value="true">Auto-size to optical resolution</option>
-            <option :value="false">Manual field dimensions</option>
+          <select v-model="fieldScaleMode" :disabled="disabled">
+            <option value="OPTICAL_FOV">Full calibrated optical FOV / fine CGH</option>
+            <option value="RESOLUTION_SAFE">Compact / resolution-safe point pattern</option>
+            <option value="MANUAL">Manual field dimensions</option>
           </select>
         </label>
 
@@ -574,7 +621,7 @@ defineExpose({ reset });
 
         <div class="target-image-field-heading">
           <span>IMAGE FIELD / UM</span>
-          <small>{{ autoScaleField ? "OPTICALLY RESOLVED / +Y UP" : "MANUAL / +Y UP" }}</small>
+          <small>{{ fieldScaleMode === "OPTICAL_FOV" ? "FULL FOURIER FOV / +Y UP" : fieldScaleMode === "RESOLUTION_SAFE" ? "COMPACT RESOLUTION-SAFE / +Y UP" : "MANUAL / +Y UP" }}</small>
         </div>
         <div class="target-image-number-grid">
           <label>WIDTH
@@ -583,7 +630,16 @@ defineExpose({ reset });
           <label>HEIGHT
             <input v-model.number="fieldHeightUm" type="number" min="0.001" step="0.1" inputmode="decimal" :disabled="disabled" @input="useManualFieldScale">
           </label>
+          <label>CENTER X
+            <input v-model.number="fieldCenterXUm" type="number" step="0.1" inputmode="decimal" :disabled="disabled">
+          </label>
+          <label>CENTER Y
+            <input v-model.number="fieldCenterYUm" type="number" step="0.1" inputmode="decimal" :disabled="disabled">
+          </label>
         </div>
+        <p v-if="destination === 'tweezers'" class="target-image-scale-note">
+          FULL FOURIER FOV PRODUCES A LARGER REPLAY FIELD AND FINE CGH TEXTURE; COMPACT SCALE PRODUCES A SMALLER REPLAY FIELD AND BROADER PHASE DOMAINS.
+        </p>
 
         <ComputationActivity
           v-if="running"
@@ -594,10 +650,15 @@ defineExpose({ reset });
         />
 
         <p v-if="errorMessage" class="target-image-error" role="alert">{{ errorMessage }}</p>
-        <div v-else class="target-image-diagnostics">
-          <span>{{ sourceWidth }} × {{ sourceHeight }} PX<span v-if="analysisWasReduced"> / REDUCED FOR ANALYSIS</span></span>
-          <span>THRESHOLD {{ thresholdSignal.toFixed(0) }} / 255 · {{ discardedSummary }}</span>
-        </div>
+        <template v-else>
+          <p v-if="overlapsZeroOrder" class="target-image-zero-order-warning" role="status">
+            TARGET ENTERS THE CENTRAL ZERO-ORDER GUARD ({{ zeroOrderClearanceUm.toFixed(2) }} µm CLEARANCE / {{ zeroOrderGuardUm.toFixed(2) }} µm GUARD). PRESERVE THE SOURCE OFFSET OR ADJUST FIELD CENTER X/Y BEFORE GENERATING.
+          </p>
+          <div class="target-image-diagnostics">
+            <span>{{ sourceWidth }} × {{ sourceHeight }} PX<span v-if="analysisWasReduced"> / REDUCED FOR ANALYSIS</span></span>
+            <span>THRESHOLD {{ thresholdSignal.toFixed(0) }} / 255 · {{ discardedSummary }}</span>
+          </div>
+        </template>
 
         <button
           class="apply-button target-image-apply"

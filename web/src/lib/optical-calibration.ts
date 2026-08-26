@@ -45,6 +45,11 @@ export interface OpticalFirstNullResolution {
   yUm: number;
 }
 
+export interface OpticalFieldSize {
+  xUm: number;
+  yUm: number;
+}
+
 export interface OpticalTrapResolutionPair {
   firstIndex: number;
   secondIndex: number;
@@ -202,6 +207,24 @@ export function parsePhaseResponseLut(source: string): number[] {
 export function opticalFieldOfViewUm(input: OpticalCalibrationInput): number {
   validateOpticalCalibration(input);
   return (input.wavelengthNm / 1000) * (input.focalLengthMm * 1000) / input.pixelPitchUm;
+}
+
+/**
+ * Largest non-aliasing image canvas represented by the signed FFT grid. The
+ * one-bin margin keeps the two Nyquist edges from mapping onto the same DFT
+ * frequency when a source image contains foreground at its outermost pixel.
+ */
+export function opticalImageFieldSizeUm(
+  dimensions: Pick<OpticalCalibrationDimensions, "fftWidth" | "fftHeight">,
+  input: OpticalCalibrationInput,
+): OpticalFieldSize {
+  positiveFinite(dimensions.fftWidth, "FFT width");
+  positiveFinite(dimensions.fftHeight, "FFT height");
+  const fieldOfView = opticalFieldOfViewUm(input);
+  return {
+    xUm: fieldOfView * (dimensions.fftWidth - 1) / dimensions.fftWidth,
+    yUm: fieldOfView * (dimensions.fftHeight - 1) / dimensions.fftHeight,
+  };
 }
 
 /** First zero of the ideal rectangular active-aperture point-spread function. */

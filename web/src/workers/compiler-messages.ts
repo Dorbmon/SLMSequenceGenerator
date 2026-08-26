@@ -37,6 +37,7 @@ export interface TweezerFrameWorkerInput {
   fftHeight: number;
   iterations: number;
   targetPhaseMode: "REFERENCE_WGS" | "PHASE_LOCKED_WGS";
+  deterministicSeed: number;
   convergenceTolerance: number;
   backend: ComputeBackend;
   opticalCalibration: OpticalCalibrationInput;

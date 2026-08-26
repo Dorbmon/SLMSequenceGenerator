@@ -10,6 +10,7 @@ import {
   DEFAULT_WAVELENGTH_NM,
   opticalEffectiveResolutionUm,
   opticalFirstNullResolutionUm,
+  opticalImageFieldSizeUm,
   phaseResponseForTwoPiSignalLevel,
 } from "./optical-calibration.js";
 
@@ -96,6 +97,17 @@ describe("optical target resolution", () => {
     expect(amplitude).toBeDefined();
     expect(amplitude![4]).toBe(1);
     expect(amplitude![5]).toBeCloseTo(Math.exp(-1), 12);
+  });
+
+  it("maps an imported image across the usable calibrated Fourier field", () => {
+    const field = opticalImageFieldSizeUm(dimensions, {
+      wavelengthNm: 407,
+      focalLengthMm: 100,
+      pixelPitchUm: 12.5,
+    });
+
+    expect(field.xUm).toBeCloseTo(3254.41015625, 8);
+    expect(field.yUm).toBeCloseTo(3252.8203125, 8);
   });
 
   it("encodes a device-ready 2pi signal level without affecting SLMControl3 input mode", () => {

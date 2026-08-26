@@ -128,6 +128,9 @@ async function compileSequence(jobId: number, input: SequenceWorkerInput): Promi
 
 async function generateTweezerFrame(jobId: number, input: TweezerFrameWorkerInput): Promise<void> {
   const started = performance.now();
+  if (!Number.isSafeInteger(input.deterministicSeed) || input.deterministicSeed < 0 || input.deterministicSeed > 0xffff_ffff) {
+    throw new Error("Free-phase seed must be an integer from 0 to 4294967295");
+  }
   if (!Number.isFinite(input.convergenceTolerance) || input.convergenceTolerance <= 0 || input.convergenceTolerance > 1) {
     throw new Error("Amplitude convergence tolerance must be greater than zero and no more than one");
   }
@@ -156,6 +159,7 @@ async function generateTweezerFrame(jobId: number, input: TweezerFrameWorkerInpu
     subsequentFrameIterations: input.iterations,
     maxIterations: input.iterations,
     targetPhaseMode: input.targetPhaseMode,
+    deterministicSeed: input.deterministicSeed,
     convergenceTolerance: input.convergenceTolerance,
     backgroundPolicy: "ZERO",
     requireConvergence: false,
