@@ -54,6 +54,32 @@ type GeneralPipelineName =
   | "finish_reduction"
   | "pack_active";
 
+/**
+ * Explicit per-entry-point resources. WebGPU's auto layouts reject both
+ * missing and surplus bind-group entries, so keep this contract beside the
+ * shader and cover phase initialization with a regression test.
+ */
+export const WEBGPU_WGS_PIPELINE_BINDINGS: Readonly<Record<GeneralPipelineName, readonly number[]>> = {
+  initialize_targets: [0, 1, 2, 3, 4],
+  initialize_optimizer: [19],
+  initialize_phase: [0, 1, 2, 5, 6],
+  sample_targets: [0, 1, 2, 8],
+  evaluate_candidate: [0, 1, 2, 19],
+  save_best_phase_codes: [0, 5, 13, 19, 20, 21],
+  save_best_targets: [0, 2, 19, 22],
+  restore_best_phase_codes: [0, 5, 13, 20, 21],
+  restore_best_targets: [0, 2, 22],
+  update_controls: [0, 1, 2, 19],
+  synthesize_phase: [0, 1, 2, 5, 19],
+  clear_support: [0, 18],
+  mark_support: [0, 1, 18],
+  quantize_codes: [0, 5, 10, 11, 13],
+  make_final_field: [0, 7, 8, 12, 13],
+  reduce_field: [0, 8, 13, 14, 15, 18],
+  finish_reduction: [0, 15, 16],
+  pack_active: [0, 13, 17],
+};
+
 interface CandidateState {
   frameIndex: number;
   targetCount: number;
@@ -395,26 +421,6 @@ export class WebGpuSequentialWgsSolver implements SequentialHologramBackend {
     })] as const));
     for (const [name, pipeline] of compiled) this.pipelines.set(name, pipeline);
 
-    const bindings: Record<GeneralPipelineName, number[]> = {
-      initialize_targets: [0, 1, 2, 3, 4],
-      initialize_optimizer: [19],
-      initialize_phase: [0, 1, 5, 6],
-      sample_targets: [0, 1, 2, 8],
-      evaluate_candidate: [0, 1, 2, 19],
-      save_best_phase_codes: [0, 5, 13, 19, 20, 21],
-      save_best_targets: [0, 2, 19, 22],
-      restore_best_phase_codes: [0, 5, 13, 20, 21],
-      restore_best_targets: [0, 2, 22],
-      update_controls: [0, 1, 2, 19],
-      synthesize_phase: [0, 1, 2, 5, 19],
-      clear_support: [0, 18],
-      mark_support: [0, 1, 18],
-      quantize_codes: [0, 5, 10, 11, 13],
-      make_final_field: [0, 7, 8, 12, 13],
-      reduce_field: [0, 8, 13, 14, 15, 18],
-      finish_reduction: [0, 15, 16],
-      pack_active: [0, 13, 17],
-    };
     const bufferByBinding: Record<number, GPUBuffer> = {
       0: this.buffers.frameParams!,
       1: this.buffers.targetInput!,
@@ -444,7 +450,10 @@ export class WebGpuSequentialWgsSolver implements SequentialHologramBackend {
       this.bindGroups.set(name, this.device.createBindGroup({
         label: `WGS ${name} bindings`,
         layout: pipeline.getBindGroupLayout(0),
-        entries: bindings[name].map((binding) => ({ binding, resource: { buffer: bufferByBinding[binding]! } })),
+        entries: WEBGPU_WGS_PIPELINE_BINDINGS[name].map((binding) => ({
+          binding,
+          resource: { buffer: bufferByBinding[binding]! },
+        })),
       }));
     }
     await this.initializeFftPipelines();

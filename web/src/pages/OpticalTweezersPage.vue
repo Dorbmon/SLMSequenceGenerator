@@ -536,7 +536,7 @@ function generateFrame(): void {
       ? "rejected"
       : response.metrics.converged ? "accepted" : "warning";
     if (!response.metrics.accepted) {
-      errorMessage.value = "The generated frame did not pass the numerical quality checks";
+      errorMessage.value = numericalRejectionMessage(response.metrics, response.backendId);
     } else if (!response.metrics.converged) {
       qualityWarning.value = convergenceWarning(response.metrics);
     }
@@ -596,6 +596,22 @@ function convergenceWarning(metric: FrameMetrics): string {
   const detail = failed.length > 0 ? failed.join("; ") : "the configured convergence gates";
   return `The best exportable frame was retained, but it is not certified: ${detail}. `
     + "The requested tolerance was not reached; inspect trap spacing and intensity, or increase the iteration budget.";
+}
+
+function numericalRejectionMessage(metric: FrameMetrics, backendId: string): string {
+  const backend = backendId.startsWith("webgpu") ? "WebGPU" : "Wasm";
+  if (metric.flags.includes("ZERO_TARGET_OUTPUT")) {
+    return `${backend} returned zero target-plane power. The frame was not accepted. `
+      + "Retry after reloading the page; if WebGPU still reports this, switch to Wasm and report the exported metadata.";
+  }
+  if (!metric.numericalValid || metric.flags.includes("NUMERIC_ERROR")) {
+    return `${backend} produced a non-finite numerical diagnostic. The frame was not accepted. `
+      + "Switch backend and export the metadata so the failing value can be identified.";
+  }
+  const flags = metric.flags.filter((flag) => flag !== "NOT_CONVERGED");
+  return flags.length > 0
+    ? `The frame failed the configured quality gate${flags.length === 1 ? "" : "s"}: ${flags.join(", ")}.`
+    : "The frame was rejected without a recognized quality flag. Export its metadata and report the backend.";
 }
 
 function rejectFrame(message: string, jobId: number, worker: Worker): void {
