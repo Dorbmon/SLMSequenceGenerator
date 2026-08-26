@@ -85,7 +85,9 @@ const targetFrequencies = computed(() => {
       activeHeight: frame.height,
       fftWidth: fftWidth.value,
       fftHeight: fftHeight.value,
-    }, props.opticalCalibration, "browser-forward-simulation-calibration");
+    }, props.opticalCalibration, "browser-forward-simulation-calibration", {
+      includeIncidentAmplitude: false,
+    });
     return props.targets.map((target) => mapPhysicalPointToDftFrequency(
       target,
       calibration,
@@ -99,12 +101,19 @@ const targetFrequencies = computed(() => {
 const targetRegion = computed(() => {
   const frame = loadedFrame.value;
   if (!frame) return null;
+  const beam = props.opticalCalibration.incidentBeam;
+  const effectiveWidth = beam
+    ? Math.max(1, Math.min(frame.width, Math.round(beam.diameterXMm * 1000 / props.opticalCalibration.pixelPitchUm)))
+    : frame.width;
+  const effectiveHeight = beam
+    ? Math.max(1, Math.min(frame.height, Math.round(beam.diameterYMm * 1000 / props.opticalCalibration.pixelPitchUm)))
+    : frame.height;
   return targetForwardSimulationRegion(
     targetFrequencies.value,
     fftWidth.value,
     fftHeight.value,
-    frame.width,
-    frame.height,
+    effectiveWidth,
+    effectiveHeight,
   );
 });
 const fullRegion = computed<ForwardSimulationRegion | null>(() => (
@@ -256,6 +265,10 @@ function simulate(): void {
       fftWidth: fftWidth.value,
       fftHeight: fftHeight.value,
       backend: backend.value,
+      pixelPitchUm: props.opticalCalibration.pixelPitchUm,
+      ...(props.opticalCalibration.incidentBeam
+        ? { incidentBeam: { ...props.opticalCalibration.incidentBeam } }
+        : {}),
       ...(props.opticalCalibration.phaseResponseLut
         ? { phaseResponseLut: [...props.opticalCalibration.phaseResponseLut] }
         : {}),
@@ -472,7 +485,7 @@ defineExpose({ reset });
           <button type="button" :disabled="!intensity || running" @click="exportIntensityBmp">Display BMP <b>&darr;</b></button>
           <button type="button" :disabled="!intensity || running" @click="exportIntensityRaw">Normalized F32 <b>&darr;</b></button>
         </div>
-        <p class="forward-model-note">MODEL / {{ opticalCalibration.phaseResponseLut ? "MEASURED PHASE-RESPONSE LUT" : "LINEAR 0–2π RESPONSE" }} · UNIFORM ILLUMINATION · NO MEASURED ABERRATION</p>
+        <p class="forward-model-note">MODEL / {{ opticalCalibration.phaseResponseLut ? "DEVICE-READY PHASE RESPONSE" : "SLMCONTROL3-CORRECTED 0–2π" }} · {{ opticalCalibration.incidentBeam ? `${opticalCalibration.incidentBeam.diameterXMm}×${opticalCalibration.incidentBeam.diameterYMm} MM GAUSSIAN BEAM` : "UNIFORM ILLUMINATION" }} · NO MEASURED ABERRATION</p>
       </div>
 
       <IntensityMapPreview

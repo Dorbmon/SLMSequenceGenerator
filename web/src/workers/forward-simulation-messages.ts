@@ -1,5 +1,6 @@
 import type { ComputeBackend } from "./compiler-messages.js";
 import type { ForwardSimulationMetrics } from "../lib/forward-simulation.js";
+import type { GaussianIncidentBeamInput } from "../lib/optical-calibration.js";
 
 export interface ForwardSimulationWorkerInput {
   pixels: ArrayBuffer;
@@ -8,6 +9,8 @@ export interface ForwardSimulationWorkerInput {
   fftWidth: number;
   fftHeight: number;
   backend: ComputeBackend;
+  pixelPitchUm?: number;
+  incidentBeam?: GaussianIncidentBeamInput;
   phaseResponseLut?: number[];
 }
 

@@ -68,14 +68,14 @@ average image brightness and phase-locked JSON/table inputs remain available.
 The resulting 8-bit frame
 can be downloaded as raw pixels, a standards-compatible grayscale BMP, or with
 its JSON metadata. A forward-simulation panel accepts the exported indexed BMP
-or a raw U8 phase-code frame, applies the same uniform active aperture and
-centered power-of-two FFT model in a dedicated worker, and renders the
+or a raw U8 phase-code frame, applies the same calibrated Gaussian incident
+field and centered power-of-two FFT model in a dedicated worker, and renders the
 FFT-shifted focal-plane intensity on a linear or adjustable decibel scale. When
 current target coordinates are available, the preview opens on a calibrated
 target-region crop, marks the requested positions, and uses physical focal-plane
 aspect instead of the generally non-square FFT pixel aspect. The full optical
-field remains selectable. Measured display-code phase LUTs are honored by both
-the Wasm and WebGPU forward paths. The
+field remains selectable. Measured display-code phase LUTs and the configured
+beam diameter/centre are honored by both the Wasm and WebGPU forward paths. The
 normalized intensity field can also be exported as a display BMP or Float32
 raw array. Forward propagation supports both Wasm and a GPU-resident WebGPU
 path.
@@ -84,10 +84,16 @@ Manually entered focal-plane coordinates are never auto-fitted. Both workspaces 
 wavelength, Fourier-lens focal length, and SLM pixel pitch and use the physical
 Fraunhofer relation `u = x N p / (lambda f)` (with the image-row sign applied to
 `y`). The displayed field of view is the corresponding Nyquist interval. The
-single-frame workspace can also load a monotonic measured display-code-to-phase
-LUT from JSON, CSV, or plain text; without one, the UI explicitly identifies
-the phase response as an ideal linear 2π simulation.
-The single-frame workspace reports the rectangular-aperture first-null spacing,
+single-frame workspace defaults to the current Hamamatsu X15213-05 experiment:
+407 nm, 12.5 µm pixels, a 100 mm physical Fourier lens, and an 8 mm 1/e²
+Gaussian beam diameter. All values remain editable. Its default SLMControl3
+pipeline exports logical `0–255 = 0–2π` phase codes and deliberately leaves the
+407 nm LUT to SLMControl3. A mutually exclusive device-ready mode can bake in
+the inspection-sheet 2π signal level (217 by default) or a monotonic measured
+display-code-to-phase LUT from JSON, CSV, or plain text; its output must be
+loaded with the SLMControl3 LUT disabled to prevent double correction.
+The single-frame workspace reports a conservative effective focal-spot scale
+that combines the finite active aperture with Gaussian-beam underfill,
 rejects unresolved trap pairs before computation, and exposes the maximum
 relative-amplitude error used by its certificate. Image patterns select a 10%
 limit by default; manually entered complex-field targets retain the strict

@@ -1,4 +1,5 @@
 import { createComplexField, fft2d } from "../../../src/index.js";
+import type { GaussianIncidentBeamInput } from "./optical-calibration.js";
 
 const TAU = Math.PI * 2;
 
@@ -8,6 +9,8 @@ export interface ForwardSimulationInput {
   height: number;
   fftWidth: number;
   fftHeight: number;
+  pixelPitchUm?: number;
+  incidentBeam?: GaussianIncidentBeamInput;
   phaseResponseLut?: readonly number[];
 }
 
@@ -60,6 +63,12 @@ export function validateForwardSimulationInput(input: ForwardSimulationInput): v
     throw new Error("The SLM frame must fit inside the FFT grid");
   }
   if (input.phaseResponseLut !== undefined) validatePhaseResponseLut(input.phaseResponseLut);
+  if (input.incidentBeam !== undefined) {
+    if (!Number.isFinite(input.pixelPitchUm) || input.pixelPitchUm! <= 0) {
+      throw new Error("Gaussian forward simulation requires a positive SLM pixel pitch");
+    }
+    validateGaussianBeam(input.incidentBeam);
+  }
 }
 
 /** Propagates a phase-code frame with the Rust/Wasm radix-2 FFT core. */
@@ -74,8 +83,9 @@ export function simulateSlmFrameWasm(input: ForwardSimulationInput): ForwardSimu
       const source = y * input.width + x;
       const destination = (yStart + y) * input.fftWidth + xStart + x;
       const phase = phaseTable[input.pixels[source]!]!;
-      field.real[destination] = Math.cos(phase);
-      field.imag[destination] = Math.sin(phase);
+      const amplitude = gaussianFieldAmplitudeAt(x, y, input.width, input.height, input.pixelPitchUm, input.incidentBeam);
+      field.real[destination] = amplitude * Math.cos(phase);
+      field.imag[destination] = amplitude * Math.sin(phase);
     }
   }
   fft2d(field, false);
@@ -92,6 +102,22 @@ export function simulateSlmFrameWasm(input: ForwardSimulationInput): ForwardSimu
     }
   }
   return finalizeForwardIntensity(input, intensity, "wasm-radix2-forward-fft");
+}
+
+export function gaussianFieldAmplitudeAt(
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  pixelPitchUm?: number,
+  beam?: GaussianIncidentBeamInput,
+): number {
+  if (!beam) return 1;
+  const xUm = (x - (width - 1) / 2) * pixelPitchUm! - (beam.centerXMm ?? 0) * 1000;
+  const yUm = (y - (height - 1) / 2) * pixelPitchUm! - (beam.centerYMm ?? 0) * 1000;
+  const normalizedX = xUm / (beam.diameterXMm * 1000);
+  const normalizedY = yUm / (beam.diameterYMm * 1000);
+  return Math.exp(-4 * (normalizedX * normalizedX + normalizedY * normalizedY));
 }
 
 export function decodeForwardPhaseCode(code: number, phaseResponseLut?: readonly number[]): number {
@@ -248,6 +274,17 @@ function validateRegion(region: ForwardSimulationRegion, fftWidth: number, fftHe
 
 function validatePositiveInteger(value: number, label: string): void {
   if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${label} must be a positive integer`);
+}
+
+function validateGaussianBeam(beam: GaussianIncidentBeamInput): void {
+  if (beam.profile !== "GAUSSIAN") throw new Error("Only Gaussian incident beams are supported");
+  if (!Number.isFinite(beam.diameterXMm) || beam.diameterXMm <= 0 ||
+      !Number.isFinite(beam.diameterYMm) || beam.diameterYMm <= 0) {
+    throw new Error("Gaussian beam diameters must be positive finite values");
+  }
+  if (!Number.isFinite(beam.centerXMm ?? 0) || !Number.isFinite(beam.centerYMm ?? 0)) {
+    throw new Error("Gaussian beam centre offsets must be finite");
+  }
 }
 
 function validatePhaseResponseLut(lut: readonly number[]): void {

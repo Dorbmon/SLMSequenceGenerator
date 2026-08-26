@@ -17,10 +17,13 @@ import {
   createOpticalCalibration,
   analyzeOpticalTrapResolution,
   DEFAULT_FOCAL_LENGTH_MM,
+  DEFAULT_INCIDENT_BEAM_DIAMETER_MM,
   DEFAULT_PIXEL_PITCH_UM,
+  DEFAULT_TWO_PI_SIGNAL_LEVEL,
   DEFAULT_WAVELENGTH_NM,
   opticalFieldOfViewUm,
-  opticalFirstNullResolutionUm,
+  opticalEffectiveResolutionUm,
+  phaseResponseForTwoPiSignalLevel,
   parsePhaseResponseLut,
   validateOpticalCalibration,
   type OpticalCalibrationInput,
@@ -50,6 +53,7 @@ import type {
 type JsonStatus = "synced" | "dirty" | "invalid";
 type OutputState = "idle" | "running" | "accepted" | "warning" | "rejected" | "cancelled";
 type TweezerTargetPhaseMode = "REFERENCE_WGS" | "PHASE_LOCKED_WGS";
+type LutApplicationMode = "SLMCONTROL3" | "BROWSER";
 
 interface TargetImageImporterHandle {
   reset(): void;
@@ -85,6 +89,12 @@ const amplitudeTolerancePercent = ref(0.01);
 const wavelengthNm = ref(DEFAULT_WAVELENGTH_NM);
 const focalLengthMm = ref(DEFAULT_FOCAL_LENGTH_MM);
 const pixelPitchUm = ref(DEFAULT_PIXEL_PITCH_UM);
+const beamDiameterXMm = ref(DEFAULT_INCIDENT_BEAM_DIAMETER_MM);
+const beamDiameterYMm = ref(DEFAULT_INCIDENT_BEAM_DIAMETER_MM);
+const beamCenterXMm = ref(0);
+const beamCenterYMm = ref(0);
+const lutApplicationMode = ref<LutApplicationMode>("SLMCONTROL3");
+const twoPiSignalLevel = ref(DEFAULT_TWO_PI_SIGNAL_LEVEL);
 const phaseResponseLut = shallowRef<number[] | undefined>(undefined);
 const phaseResponseFilename = ref("");
 const running = ref(false);
@@ -104,11 +114,27 @@ let calculationStarted = 0;
 
 const fftWidth = computed(() => fftDimensionFor(slmWidth.value));
 const fftHeight = computed(() => fftDimensionFor(slmHeight.value));
+const effectivePhaseResponseLut = computed(() => {
+  if (lutApplicationMode.value === "SLMCONTROL3") return undefined;
+  if (phaseResponseLut.value) return phaseResponseLut.value;
+  try {
+    return phaseResponseForTwoPiSignalLevel(twoPiSignalLevel.value);
+  } catch {
+    return undefined;
+  }
+});
 const opticalCalibrationInput = computed<OpticalCalibrationInput>(() => ({
   wavelengthNm: wavelengthNm.value,
   focalLengthMm: focalLengthMm.value,
   pixelPitchUm: pixelPitchUm.value,
-  ...(phaseResponseLut.value ? { phaseResponseLut: [...phaseResponseLut.value] } : {}),
+  incidentBeam: {
+    profile: "GAUSSIAN",
+    diameterXMm: beamDiameterXMm.value,
+    diameterYMm: beamDiameterYMm.value,
+    centerXMm: beamCenterXMm.value,
+    centerYMm: beamCenterYMm.value,
+  },
+  ...(effectivePhaseResponseLut.value ? { phaseResponseLut: [...effectivePhaseResponseLut.value] } : {}),
 }));
 const fieldOfViewUm = computed(() => {
   try {
@@ -119,7 +145,7 @@ const fieldOfViewUm = computed(() => {
 });
 const opticalResolution = computed(() => {
   try {
-    return opticalFirstNullResolutionUm({
+    return opticalEffectiveResolutionUm({
       activeWidth: slmWidth.value,
       activeHeight: slmHeight.value,
     }, opticalCalibrationInput.value);
@@ -284,6 +310,12 @@ function reset(): void {
   wavelengthNm.value = DEFAULT_WAVELENGTH_NM;
   focalLengthMm.value = DEFAULT_FOCAL_LENGTH_MM;
   pixelPitchUm.value = DEFAULT_PIXEL_PITCH_UM;
+  beamDiameterXMm.value = DEFAULT_INCIDENT_BEAM_DIAMETER_MM;
+  beamDiameterYMm.value = DEFAULT_INCIDENT_BEAM_DIAMETER_MM;
+  beamCenterXMm.value = 0;
+  beamCenterYMm.value = 0;
+  lutApplicationMode.value = "SLMCONTROL3";
+  twoPiSignalLevel.value = DEFAULT_TWO_PI_SIGNAL_LEVEL;
   phaseResponseLut.value = undefined;
   phaseResponseFilename.value = "";
   running.value = false;
@@ -349,17 +381,22 @@ function updateAmplitudeTolerance(): void {
   invalidateOutput();
 }
 
-function calibrationFor(): CalibrationPackage {
+function calibrationFor(includeIncidentAmplitude = true): CalibrationPackage {
   return createOpticalCalibration({
     activeWidth: slmWidth.value,
     activeHeight: slmHeight.value,
     fftWidth: fftWidth.value,
     fftHeight: fftHeight.value,
-  }, opticalCalibrationInput.value, "browser-single-frame-optical-calibration");
+  }, opticalCalibrationInput.value, "browser-single-frame-optical-calibration", {
+    includeIncidentAmplitude,
+  });
 }
 
 function updateOpticalCalibration(): void {
   try {
+    if (lutApplicationMode.value === "BROWSER" && !phaseResponseLut.value) {
+      phaseResponseForTwoPiSignalLevel(twoPiSignalLevel.value);
+    }
     validateOpticalCalibration(opticalCalibrationInput.value);
     errorMessage.value = "";
     invalidateOutput();
@@ -377,6 +414,7 @@ async function loadPhaseResponse(event: Event): Promise<void> {
   try {
     phaseResponseLut.value = parsePhaseResponseLut(await file.text());
     phaseResponseFilename.value = file.name;
+    lutApplicationMode.value = "BROWSER";
     invalidateOutput();
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : "Unable to load the measured phase-response LUT";
@@ -390,16 +428,42 @@ function clearPhaseResponse(): void {
   invalidateOutput();
 }
 
+function updateLutApplicationMode(event: Event): void {
+  lutApplicationMode.value = (event.target as HTMLSelectElement).value as LutApplicationMode;
+  invalidateOutput();
+}
+
+function updateTwoPiSignalLevel(): void {
+  try {
+    phaseResponseForTwoPiSignalLevel(twoPiSignalLevel.value);
+    errorMessage.value = "";
+    invalidateOutput();
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : "Invalid 2pi signal level";
+    outputState.value = "rejected";
+  }
+}
+
 function generateFrame(): void {
   if (running.value) return;
   const input = validatedTweezers();
   if (!input) return;
   let calibration: CalibrationPackage;
   try {
+    if (lutApplicationMode.value === "BROWSER" && !phaseResponseLut.value) {
+      phaseResponseForTwoPiSignalLevel(twoPiSignalLevel.value);
+    }
     validateOpticalCalibration(opticalCalibrationInput.value);
     updateAmplitudeToleranceValue();
-    calibration = calibrationFor();
-    const resolution = analyzeOpticalTrapResolution(input, calibration, fftWidth.value, fftHeight.value);
+    calibration = calibrationFor(false);
+    const resolution = analyzeOpticalTrapResolution(
+      input,
+      calibration,
+      fftWidth.value,
+      fftHeight.value,
+      0.98,
+      opticalCalibrationInput.value,
+    );
     if (resolution.unresolvedPairCount > 0 && resolution.worstPair) {
       const first = input[resolution.worstPair.firstIndex]!;
       const second = input[resolution.worstPair.secondIndex]!;
@@ -568,7 +632,7 @@ function exportRawFrame(): void {
   const copy = new Uint8Array(bytesFor(outputPixels.value));
   download(
     new Blob([copy.buffer], { type: "application/octet-stream" }),
-    `slm-frame-${slmWidth.value}x${slmHeight.value}-u8.bin`,
+    `${lutApplicationMode.value === "SLMCONTROL3" ? "slmcontrol3-input" : "device-ready"}-${slmWidth.value}x${slmHeight.value}-u8.bin`,
   );
 }
 
@@ -577,7 +641,7 @@ function exportBmp(): void {
   const bmp = encodeGrayscaleBmp(outputPixels.value, slmWidth.value, slmHeight.value);
   download(
     new Blob([bmp.buffer as ArrayBuffer], { type: "image/bmp" }),
-    `slm-frame-${slmWidth.value}x${slmHeight.value}.bmp`,
+    `${lutApplicationMode.value === "SLMCONTROL3" ? "slmcontrol3-input" : "device-ready"}-${slmWidth.value}x${slmHeight.value}.bmp`,
   );
 }
 
@@ -585,7 +649,7 @@ function exportMetadata(): void {
   if (!outputPixels.value || !metrics.value) return;
   const input = validatedTweezers();
   if (!input) return;
-  const calibration = calibrationFor();
+  const calibration = calibrationFor(false);
   const payload = {
     formatVersion: "1.0",
     output: {
@@ -614,7 +678,13 @@ function exportMetadata(): void {
     calibration: {
       manifest: calibration.manifest,
       coordinateTransform: calibration.coordinateTransform,
-      phaseResponseLut: phaseResponseLut.value ?? "ideal linear 2π response",
+      incidentBeam: opticalCalibrationInput.value.incidentBeam,
+      phaseCodePipeline: lutApplicationMode.value === "SLMCONTROL3"
+        ? `normalized 0-255 input; SLMControl3 applies its ${wavelengthNm.value} nm LUT (2pi signal level ${twoPiSignalLevel.value})`
+        : phaseResponseLut.value
+          ? `device-ready codes from measured response ${phaseResponseFilename.value}`
+          : `device-ready linear response; 2pi signal level ${twoPiSignalLevel.value}`,
+      phaseResponseLut: effectivePhaseResponseLut.value ?? "linear logical 0-255; corrected by SLMControl3",
     },
     tweezers: input,
     metrics: metrics.value,
@@ -790,31 +860,60 @@ defineExpose({ reset });
               <p class="resolution-note">FFT COMPUTE GRID {{ fftWidth }} &times; {{ fftHeight }} / POWER-OF-TWO PADDED</p>
             </div>
             <div class="optical-calibration-block">
-              <div class="control-label"><span>OPTICAL CALIBRATION</span><output>FRAUNHOFER / NUDFT</output></div>
+              <div class="control-label"><span>OPTICAL CALIBRATION</span><output>X15213-05 / PHYSICAL LENS</output></div>
               <div class="optical-calibration-fields">
                 <label>WAVELENGTH / NM
                   <input v-model.number="wavelengthNm" type="number" min="0.001" step="any" :disabled="running" @change="updateOpticalCalibration">
                 </label>
-                <label>FOCAL LENGTH / MM
+                <label>PHYSICAL LENS FOCAL LENGTH / MM
                   <input v-model.number="focalLengthMm" type="number" min="0.001" step="any" :disabled="running" @change="updateOpticalCalibration">
                 </label>
                 <label>PIXEL PITCH / UM
                   <input v-model.number="pixelPitchUm" type="number" min="0.001" step="any" :disabled="running" @change="updateOpticalCalibration">
                 </label>
               </div>
+              <div class="beam-calibration-fields">
+                <label>BEAM 1/E² DIAMETER X / MM
+                  <input v-model.number="beamDiameterXMm" type="number" min="0.001" step="any" :disabled="running" @change="updateOpticalCalibration">
+                </label>
+                <label>BEAM 1/E² DIAMETER Y / MM
+                  <input v-model.number="beamDiameterYMm" type="number" min="0.001" step="any" :disabled="running" @change="updateOpticalCalibration">
+                </label>
+                <label>BEAM CENTRE X / MM
+                  <input v-model.number="beamCenterXMm" type="number" step="any" :disabled="running" @change="updateOpticalCalibration">
+                </label>
+                <label>BEAM CENTRE Y / MM
+                  <input v-model.number="beamCenterYMm" type="number" step="any" :disabled="running" @change="updateOpticalCalibration">
+                </label>
+              </div>
               <p class="tweezer-calibration-note">
                 FOCAL-PLANE FOV {{ fieldOfViewUm === null ? "INVALID" : `${fieldOfViewUm.toFixed(1)} × ${fieldOfViewUm.toFixed(1)} UM` }}
-                <template v-if="opticalResolution"> / FIRST-NULL {{ opticalResolution.xUm.toFixed(3) }} × {{ opticalResolution.yUm.toFixed(3) }} UM</template>
+                <template v-if="opticalResolution"> / EFFECTIVE SPOT SCALE {{ opticalResolution.xUm.toFixed(3) }} × {{ opticalResolution.yUm.toFixed(3) }} UM</template>
               </p>
-              <div class="phase-lut-actions">
+              <p class="resolution-note">THE OBSERVED “100-A” LENS MARKING IS INTERPRETED AS 100 MM EFL / KEEP THIS FIELD EDITABLE IF THE FULL PART NUMBER DIFFERS</p>
+              <p class="resolution-note">GAUSSIAN FIELD AMPLITUDE IS INCLUDED IN WGS AND FORWARD SIMULATION / {{ beamDiameterXMm }} × {{ beamDiameterYMm }} MM AT THE SLM</p>
+              <div class="lut-pipeline-fields">
+                <label>PHASE-CODE PIPELINE
+                  <select :value="lutApplicationMode" :disabled="running" @change="updateLutApplicationMode">
+                    <option value="SLMCONTROL3">SLMControl3 / LUT ON</option>
+                    <option value="BROWSER">Device-ready / LUT baked into BMP</option>
+                  </select>
+                </label>
+                <label>2π SIGNAL LEVEL / CODE
+                  <input v-model.number="twoPiSignalLevel" type="number" min="1" max="255" step="1" :disabled="running || lutApplicationMode === 'SLMCONTROL3'" @change="updateTwoPiSignalLevel">
+                </label>
+              </div>
+              <div v-if="lutApplicationMode === 'BROWSER'" class="phase-lut-actions">
                 <button type="button" :disabled="running" @click="calibrationUpload?.click()">
                   {{ phaseResponseLut ? "Replace measured phase LUT" : "Upload measured phase LUT" }}
                 </button>
-                <button v-if="phaseResponseLut" type="button" :disabled="running" @click="clearPhaseResponse">Use ideal linear response</button>
-                <input ref="calibrationUpload" class="sr-only" type="file" accept="application/json,.json,.csv,.txt,text/plain,text/csv" @change="loadPhaseResponse">
+                <button v-if="phaseResponseLut" type="button" :disabled="running" @click="clearPhaseResponse">Use 2π signal level</button>
               </div>
-              <p class="resolution-note">
-                {{ phaseResponseLut ? `MEASURED RESPONSE / ${phaseResponseLut.length} SAMPLES / ${phaseResponseFilename}` : "IDEAL LINEAR 2π RESPONSE / UPLOAD MEASURED VALUES FOR HARDWARE" }}
+              <input ref="calibrationUpload" class="sr-only" type="file" accept="application/json,.json,.csv,.txt,text/plain,text/csv" @change="loadPhaseResponse">
+              <p class="resolution-note" :class="{ 'lut-external-note': lutApplicationMode === 'SLMCONTROL3' }">
+                <template v-if="lutApplicationMode === 'SLMCONTROL3'">EXPORT 0–255 LOGICAL PHASE / SLMCONTROL3 APPLIES {{ wavelengthNm }} NM LUT / DO NOT BAKE {{ twoPiSignalLevel }} INTO THE BMP</template>
+                <template v-else-if="phaseResponseLut">DEVICE-READY MEASURED RESPONSE / {{ phaseResponseLut.length }} SAMPLES / {{ phaseResponseFilename }}</template>
+                <template v-else>DEVICE-READY LINEAR RESPONSE / CODE {{ twoPiSignalLevel }} = 2π / SLMCONTROL3 LUT MUST BE OFF</template>
               </p>
             </div>
             <label class="tweezer-backend-choice">COMPUTE BACKEND

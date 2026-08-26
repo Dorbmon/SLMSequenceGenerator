@@ -54,10 +54,15 @@ button, input, select { font: inherit; } button { cursor: pointer; }
 .optical-calibration-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; margin-top: 10px; }
 .optical-calibration-fields label { color: var(--muted); font: 7px/1.35 var(--mono); letter-spacing: .06em; }
 .optical-calibration-fields input { width: 100%; margin-top: 5px; padding: 8px 7px; border: 1px solid var(--line); color: var(--ink); background: #080b0d; font: 10px var(--mono); }
+.beam-calibration-fields, .lut-pipeline-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; margin-top: 9px; }
+.beam-calibration-fields label, .lut-pipeline-fields label { color: var(--muted); font: 7px/1.35 var(--mono); letter-spacing: .06em; }
+.beam-calibration-fields input, .lut-pipeline-fields input, .lut-pipeline-fields select { width: 100%; margin-top: 5px; padding: 8px 7px; border: 1px solid var(--line); color: var(--ink); background: #080b0d; font: 9px var(--mono); }
+.compact-beam-fields { margin-top: 7px; }
+.lut-external-note { color: var(--cyan); }
 .phase-lut-actions { display: flex; gap: 7px; margin-top: 10px; }
 .phase-lut-actions button { flex: 1; padding: 8px; border: 1px solid var(--line); color: var(--ink); background: transparent; font: 7px var(--mono); letter-spacing: .05em; text-transform: uppercase; }
 .phase-lut-actions button:hover:not(:disabled) { border-color: var(--acid); color: var(--acid); }
-@media (max-width: 620px) { .optical-calibration-fields { grid-template-columns: 1fr; } }
+@media (max-width: 620px) { .optical-calibration-fields, .beam-calibration-fields, .lut-pipeline-fields { grid-template-columns: 1fr; } }
 .tweezer-backend-choice { display: grid; gap: 8px; margin-top: 20px; color: var(--faint); font: 8px/1.4 var(--mono); letter-spacing: .09em; }.tweezer-backend-choice select { width: 100%; padding: 8px 0; border: 0; border-bottom: 1px solid var(--line); outline: 0; color: var(--ink); background: transparent; font: 9px var(--mono); }.tweezer-backend-choice small { color: var(--faint); font: 7px/1.5 var(--mono); }.tweezer-backend-choice small.is-available { color: var(--cyan); }
 .tweezer-certificate-choice input { width: 100%; padding: 8px 0; border: 0; border-bottom: 1px solid var(--line); outline: 0; color: var(--ink); background: transparent; font: 10px var(--mono); }
 

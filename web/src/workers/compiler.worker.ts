@@ -132,7 +132,14 @@ async function generateTweezerFrame(jobId: number, input: TweezerFrameWorkerInpu
     throw new Error("Amplitude convergence tolerance must be greater than zero and no more than one");
   }
   const calibration = tweezerCalibration(input);
-  const resolution = analyzeOpticalTrapResolution(input.tweezers, calibration, input.fftWidth, input.fftHeight);
+  const resolution = analyzeOpticalTrapResolution(
+    input.tweezers,
+    calibration,
+    input.fftWidth,
+    input.fftHeight,
+    0.98,
+    input.opticalCalibration,
+  );
   if (resolution.unresolvedPairCount > 0 && resolution.worstPair) {
     const first = input.tweezers[resolution.worstPair.firstIndex]!;
     const second = input.tweezers[resolution.worstPair.secondIndex]!;

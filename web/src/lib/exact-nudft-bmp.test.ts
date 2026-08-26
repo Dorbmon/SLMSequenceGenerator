@@ -8,7 +8,11 @@ import {
 } from "../../../src/index.js";
 import { decodeGrayscaleBmp, encodeGrayscaleBmp } from "./bmp.js";
 import { simulateSlmFrameWasm } from "./forward-simulation.js";
-import { createOpticalCalibration, parsePhaseResponseLut } from "./optical-calibration.js";
+import {
+  createOpticalCalibration,
+  parsePhaseResponseLut,
+  phaseResponseForTwoPiSignalLevel,
+} from "./optical-calibration.js";
 
 const TAU = 2 * Math.PI;
 
@@ -100,6 +104,45 @@ describe("exact trap-domain Fourier regression", () => {
     expect(localPeak).toBeGreaterThan(0.95);
     expect(Math.abs(propagated.metrics.peakX - expectedX)).toBeLessThanOrEqual(1);
     expect(Math.abs(propagated.metrics.peakY - expectedY)).toBeLessThanOrEqual(1);
+  });
+
+  it("keeps device-ready Hamamatsu codes at or below the configured 2pi level", () => {
+    const width = 32;
+    const height = 16;
+    const calibration = createOpticalCalibration({
+      activeWidth: width,
+      activeHeight: height,
+      fftWidth: width,
+      fftHeight: height,
+    }, {
+      wavelengthNm: 407,
+      focalLengthMm: 100,
+      pixelPitchUm: 12.5,
+      incidentBeam: {
+        profile: "GAUSSIAN",
+        diameterXMm: 8,
+        diameterYMm: 8,
+      },
+      phaseResponseLut: phaseResponseForTwoPiSignalLevel(217),
+    }, "hamamatsu-device-ready-codes");
+    const result = new SequentialWgsSolver(calibration, {
+      width,
+      height,
+      format: "UINT8",
+      firstFrameIterations: 2,
+      maxIterations: 2,
+      targetPhaseMode: "REFERENCE_WGS",
+      backgroundPolicy: "ZERO",
+      requireConvergence: false,
+    }).solveSequentialFrame({
+      frameIndex: 0,
+      timeUs: 0,
+      traps: [
+        { trapId: 1, atomId: null, xUm: 10, yUm: 0, intensity: 1, targetPhaseRad: 0, flags: 0 },
+        { trapId: 2, atomId: null, xUm: -10, yUm: 5, intensity: 1, targetPhaseRad: 0, flags: 0 },
+      ],
+    });
+    expect(Math.max(...result.pixels)).toBeLessThanOrEqual(217);
   });
 
   it("certifies the default four traps and retains the best exported BMP", () => {

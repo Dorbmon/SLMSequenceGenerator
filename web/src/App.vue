@@ -16,6 +16,7 @@ import { cloneAtoms, cloneTargets } from "./lib/coordinates.js";
 import OpticalTweezersPage from "./pages/OpticalTweezersPage.vue";
 import {
   DEFAULT_FOCAL_LENGTH_MM,
+  DEFAULT_INCIDENT_BEAM_DIAMETER_MM,
   DEFAULT_PIXEL_PITCH_UM,
   DEFAULT_WAVELENGTH_NM,
 } from "./lib/optical-calibration.js";
@@ -67,6 +68,8 @@ const computeBackend = ref<ComputeBackend>("wasm");
 const wavelengthNm = ref(DEFAULT_WAVELENGTH_NM);
 const focalLengthMm = ref(DEFAULT_FOCAL_LENGTH_MM);
 const pixelPitchUm = ref(DEFAULT_PIXEL_PITCH_UM);
+const beamDiameterXMm = ref(DEFAULT_INCIDENT_BEAM_DIAMETER_MM);
+const beamDiameterYMm = ref(DEFAULT_INCIDENT_BEAM_DIAMETER_MM);
 const webgpuAvailable = ref(false);
 const webgpuStatus = ref("CHECKING WEBGPU IN WORKER…");
 const running = ref(false);
@@ -188,14 +191,16 @@ function updateSlmHeight(value: number): void {
   }
 }
 
-function updateOpticalCalibration(field: "wavelength" | "focalLength" | "pixelPitch", value: number): void {
+function updateOpticalCalibration(field: "wavelength" | "focalLength" | "pixelPitch" | "beamDiameterX" | "beamDiameterY", value: number): void {
   if (!Number.isFinite(value) || value <= 0) {
     inputError.value = "Optical calibration values must be positive finite numbers";
     return;
   }
   if (field === "wavelength") wavelengthNm.value = value;
   else if (field === "focalLength") focalLengthMm.value = value;
-  else pixelPitchUm.value = value;
+  else if (field === "pixelPitch") pixelPitchUm.value = value;
+  else if (field === "beamDiameterX") beamDiameterXMm.value = value;
+  else beamDiameterYMm.value = value;
   inputError.value = "";
   invalidateSequence("Optical calibration changed");
 }
@@ -325,6 +330,13 @@ function compileSequence(): void {
         wavelengthNm: wavelengthNm.value,
         focalLengthMm: focalLengthMm.value,
         pixelPitchUm: pixelPitchUm.value,
+        incidentBeam: {
+          profile: "GAUSSIAN",
+          diameterXMm: beamDiameterXMm.value,
+          diameterYMm: beamDiameterYMm.value,
+          centerXMm: 0,
+          centerYMm: 0,
+        },
       },
     },
   };
@@ -493,6 +505,8 @@ function reset(): void {
   wavelengthNm.value = DEFAULT_WAVELENGTH_NM;
   focalLengthMm.value = DEFAULT_FOCAL_LENGTH_MM;
   pixelPitchUm.value = DEFAULT_PIXEL_PITCH_UM;
+  beamDiameterXMm.value = DEFAULT_INCIDENT_BEAM_DIAMETER_MM;
+  beamDiameterYMm.value = DEFAULT_INCIDENT_BEAM_DIAMETER_MM;
   phaseMode.value = "Phase locked WGS";
   computeBackend.value = "wasm";
   inputError.value = "";
@@ -592,6 +606,8 @@ onBeforeUnmount(() => {
           :wavelength-nm="wavelengthNm"
           :focal-length-mm="focalLengthMm"
           :pixel-pitch-um="pixelPitchUm"
+          :beam-diameter-x-mm="beamDiameterXMm"
+          :beam-diameter-y-mm="beamDiameterYMm"
           :phase-mode="phaseMode"
           :compute-backend="computeBackend"
           :webgpu-available="webgpuAvailable"
@@ -610,6 +626,8 @@ onBeforeUnmount(() => {
           @update:wavelength-nm="updateOpticalCalibration('wavelength', $event)"
           @update:focal-length-mm="updateOpticalCalibration('focalLength', $event)"
           @update:pixel-pitch-um="updateOpticalCalibration('pixelPitch', $event)"
+          @update:beam-diameter-x-mm="updateOpticalCalibration('beamDiameterX', $event)"
+          @update:beam-diameter-y-mm="updateOpticalCalibration('beamDiameterY', $event)"
           @update:phase-mode="updatePhaseMode"
           @update:compute-backend="updateComputeBackend"
           @compile="compileSequence"

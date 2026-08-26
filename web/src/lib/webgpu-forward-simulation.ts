@@ -35,7 +35,9 @@ export async function simulateSlmFrameWebGpu(input: ForwardSimulationInput): Pro
   let fftParameters: GPUBuffer | undefined;
   let readback: GPUBuffer | undefined;
   try {
-    const parameters = new Uint32Array([
+    const parameters = new ArrayBuffer(64);
+    const parameterView = new DataView(parameters);
+    [
       input.fftWidth,
       input.fftHeight,
       input.width,
@@ -44,7 +46,14 @@ export async function simulateSlmFrameWebGpu(input: ForwardSimulationInput): Pro
       Math.floor((input.fftHeight - input.height) / 2),
       pixelCount,
       0,
-    ]);
+    ].forEach((value, index) => parameterView.setUint32(index * 4, value, true));
+    const beam = input.incidentBeam;
+    parameterView.setFloat32(32, input.pixelPitchUm ?? 1, true);
+    parameterView.setFloat32(36, (beam?.diameterXMm ?? 1) * 1000, true);
+    parameterView.setFloat32(40, (beam?.diameterYMm ?? 1) * 1000, true);
+    parameterView.setFloat32(44, (beam?.centerXMm ?? 0) * 1000, true);
+    parameterView.setFloat32(48, (beam?.centerYMm ?? 0) * 1000, true);
+    parameterView.setUint32(52, beam ? 1 : 0, true);
     const codes = Uint32Array.from(input.pixels);
     const phaseTable = createForwardPhaseTable(input.phaseResponseLut);
     const parameterBuffer = device.createBuffer({
@@ -73,7 +82,7 @@ export async function simulateSlmFrameWebGpu(input: ForwardSimulationInput): Pro
       usage: storage | copyDestination,
     });
     buffers.push(parameterBuffer, codeBuffer, fieldBuffer, intensityBuffer, phaseTableBuffer);
-    device.queue.writeBuffer(parameterBuffer, 0, parameters.buffer as ArrayBuffer);
+    device.queue.writeBuffer(parameterBuffer, 0, parameters);
     device.queue.writeBuffer(codeBuffer, 0, codes.buffer as ArrayBuffer);
     device.queue.writeBuffer(phaseTableBuffer, 0, phaseTable.buffer as ArrayBuffer);
 
@@ -262,6 +271,14 @@ struct Parameters {
   yStart: u32,
   pixelCount: u32,
   padding: u32,
+  pixelPitchUm: f32,
+  beamDiameterXUm: f32,
+  beamDiameterYUm: f32,
+  beamCenterXUm: f32,
+  beamCenterYUm: f32,
+  beamEnabled: u32,
+  padding2: u32,
+  padding3: u32,
 }
 
 @group(0) @binding(0) var<uniform> params: Parameters;
@@ -282,7 +299,17 @@ fn make_field(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
   let activeIndex = (y - params.yStart) * params.activeWidth + (x - params.xStart);
   let phase = phaseByCode[codes[activeIndex]];
-  field[index] = vec2<f32>(cos(phase), sin(phase));
+  var amplitude = 1.0;
+  if (params.beamEnabled != 0u) {
+    let activeX = f32(activeIndex % params.activeWidth);
+    let activeY = f32(activeIndex / params.activeWidth);
+    let xUm = (activeX - (f32(params.activeWidth) - 1.0) * 0.5) * params.pixelPitchUm - params.beamCenterXUm;
+    let yUm = (activeY - (f32(params.activeHeight) - 1.0) * 0.5) * params.pixelPitchUm - params.beamCenterYUm;
+    let normalizedX = xUm / params.beamDiameterXUm;
+    let normalizedY = yUm / params.beamDiameterYUm;
+    amplitude = exp(-4.0 * (normalizedX * normalizedX + normalizedY * normalizedY));
+  }
+  field[index] = amplitude * vec2<f32>(cos(phase), sin(phase));
 }
 
 @compute @workgroup_size(${WORKGROUP_SIZE})

@@ -18,6 +18,8 @@ const props = defineProps<{
   wavelengthNm: number;
   focalLengthMm: number;
   pixelPitchUm: number;
+  beamDiameterXMm: number;
+  beamDiameterYMm: number;
   phaseMode: string;
   computeBackend: ComputeBackend;
   webgpuAvailable: boolean;
@@ -39,6 +41,8 @@ const emit = defineEmits<{
   "update:wavelengthNm": [value: number];
   "update:focalLengthMm": [value: number];
   "update:pixelPitchUm": [value: number];
+  "update:beamDiameterXMm": [value: number];
+  "update:beamDiameterYMm": [value: number];
   "update:phaseMode": [value: string];
   "update:computeBackend": [value: ComputeBackend];
   compile: [];
@@ -168,7 +172,15 @@ function positiveFromEvent(event: Event, fallback: number): number {
           <input type="number" min="0.001" step="any" :value="pixelPitchUm" :disabled="running" @change="emit('update:pixelPitchUm', positiveFromEvent($event, pixelPitchUm))">
         </label>
       </div>
-      <p class="resolution-note">FRAUNHOFER COORDINATE MAP / EXACT TRAP-DOMAIN NUDFT</p>
+      <div class="beam-calibration-fields compact-beam-fields">
+        <label>BEAM 1/E² X / MM
+          <input type="number" min="0.001" step="any" :value="beamDiameterXMm" :disabled="running" @change="emit('update:beamDiameterXMm', positiveFromEvent($event, beamDiameterXMm))">
+        </label>
+        <label>BEAM 1/E² Y / MM
+          <input type="number" min="0.001" step="any" :value="beamDiameterYMm" :disabled="running" @change="emit('update:beamDiameterYMm', positiveFromEvent($event, beamDiameterYMm))">
+        </label>
+      </div>
+      <p class="resolution-note">X15213-05 PRESET / PHYSICAL {{ focalLengthMm }} MM FOURIER LENS / GAUSSIAN-PUPIL EXACT NUDFT</p>
     </div>
     <div class="select-row">
       <label>ASSIGNMENT

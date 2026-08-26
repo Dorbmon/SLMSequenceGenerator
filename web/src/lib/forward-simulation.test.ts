@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   decodeForwardPhaseCode,
   forwardSimulationRegionAspect,
+  gaussianFieldAmplitudeAt,
   shiftedForwardCoordinate,
   simulateSlmFrameWasm,
   targetForwardSimulationRegion,
@@ -37,6 +38,35 @@ describe("SLM forward simulation", () => {
     expect(result.metrics.peakOffsetY).toBe(0);
     expect(result.metrics.maximumIntensity).toBeCloseTo((18 * 20) ** 2, 1);
     expect(Math.max(...result.intensity)).toBe(1);
+  });
+
+  it("propagates the measured Gaussian pupil instead of a uniform full aperture", () => {
+    const size = 16;
+    const beam = {
+      profile: "GAUSSIAN" as const,
+      diameterXMm: 0.08,
+      diameterYMm: 0.08,
+      centerXMm: 0,
+      centerYMm: 0,
+    };
+    const result = simulateSlmFrameWasm({
+      pixels: new Uint8Array(size * size),
+      width: size,
+      height: size,
+      fftWidth: size,
+      fftHeight: size,
+      pixelPitchUm: 10,
+      incidentBeam: beam,
+    });
+    let fieldSum = 0;
+    for (let y = 0; y < size; y += 1) {
+      for (let x = 0; x < size; x += 1) {
+        fieldSum += gaussianFieldAmplitudeAt(x, y, size, size, 10, beam);
+      }
+    }
+    expect(result.metrics.maximumIntensity).toBeCloseTo(fieldSum ** 2, 2);
+    expect(result.intensity[8 * size + 9]).toBeGreaterThan(1e-3);
+    expect([...result.intensity].filter((value) => value > 1e-6).length).toBeGreaterThan(1);
   });
 
   it("reports the signed FFT offset of a phase ramp", () => {
