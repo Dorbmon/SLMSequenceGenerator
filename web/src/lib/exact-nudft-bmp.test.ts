@@ -13,6 +13,7 @@ import {
   parsePhaseResponseLut,
   phaseResponseForTwoPiSignalLevel,
 } from "./optical-calibration.js";
+import { DEFAULT_TWEEZER_AMPLITUDE_TOLERANCE_PERCENT } from "./tweezers.js";
 
 const TAU = 2 * Math.PI;
 
@@ -145,7 +146,7 @@ describe("exact trap-domain Fourier regression", () => {
     expect(Math.max(...result.pixels)).toBeLessThanOrEqual(217);
   });
 
-  it("certifies the default four traps and retains the best exported BMP", () => {
+  it("certifies the calibrated default four traps at the attainable 8-bit tolerance", () => {
     const width = 1272;
     const height = 1024;
     const fftWidth = 2048;
@@ -155,9 +156,14 @@ describe("exact trap-domain Fourier regression", () => {
       fftWidth,
       fftHeight: height,
     }, {
-      wavelengthNm: 780,
-      focalLengthMm: 20,
-      pixelPitchUm: 8,
+      wavelengthNm: 407,
+      focalLengthMm: 100,
+      pixelPitchUm: 12.5,
+      incidentBeam: {
+        profile: "GAUSSIAN",
+        diameterXMm: 8,
+        diameterYMm: 8,
+      },
     }, "default-four-trap-regression");
     const frame = {
       frameIndex: 0,
@@ -178,11 +184,13 @@ describe("exact trap-domain Fourier regression", () => {
       targetPhaseMode: "PHASE_LOCKED_WGS",
       backgroundPolicy: "ZERO",
       requireConvergence: false,
+      convergenceTolerance: DEFAULT_TWEEZER_AMPLITUDE_TOLERANCE_PERCENT / 100,
     }).solveSequentialFrame(frame);
 
     const fourIterations = solve(4);
     const twelveIterations = solve(12);
     expect(fourIterations.metrics.converged).toBe(true);
+    expect(fourIterations.metrics.maximumRelativeAmplitudeError).toBeGreaterThan(1e-4);
     expect(fourIterations.metrics.maximumRelativeAmplitudeError)
       .toBeLessThanOrEqual(fourIterations.metrics.amplitudeConvergenceTolerance);
     expect(fourIterations.metrics.maximumTargetPhaseErrorRad)
@@ -196,7 +204,16 @@ describe("exact trap-domain Fourier regression", () => {
     const decoded = decodeGrayscaleBmp(encodeGrayscaleBmp(fourIterations.pixels, width, height));
     const measured = frame.traps.map((trap) => {
       const mapped = mapPhysicalPointToFft(trap, calibration, fftWidth, height);
-      return directCodeDft(decoded.pixels, width, height, mapped.x, mapped.y, fftWidth, height);
+      return directCodeDft(
+        decoded.pixels,
+        width,
+        height,
+        mapped.x,
+        mapped.y,
+        fftWidth,
+        height,
+        calibration.incidentAmplitude,
+      );
     });
     const amplitudes = measured.map((value) => Math.hypot(value.real, value.imag));
     const scale = amplitudes.reduce((sum, value) => sum + value, 0) / amplitudes.length;
@@ -251,13 +268,15 @@ function directCodeDft(
   targetY: number,
   fftWidth = activeWidth,
   fftHeight = activeHeight,
+  incidentAmplitude?: ArrayLike<number>,
 ): { real: number; imag: number } {
   const real = new Float64Array(pixels.length);
   const imag = new Float64Array(pixels.length);
   for (let index = 0; index < pixels.length; index += 1) {
     const phase = pixels[index]! / 255 * TAU - Math.PI;
-    real[index] = Math.cos(phase);
-    imag[index] = Math.sin(phase);
+    const amplitude = incidentAmplitude?.[index] ?? 1;
+    real[index] = amplitude * Math.cos(phase);
+    imag[index] = amplitude * Math.sin(phase);
   }
   const xStart = Math.floor((fftWidth - activeWidth) / 2);
   const yStart = Math.floor((fftHeight - activeHeight) / 2);

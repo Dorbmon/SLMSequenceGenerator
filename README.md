@@ -96,8 +96,8 @@ The single-frame workspace reports a conservative effective focal-spot scale
 that combines the finite active aperture with Gaussian-beam underfill,
 rejects unresolved trap pairs before computation, and exposes the maximum
 relative-amplitude error used by its certificate. Image patterns select a 10%
-limit by default; manually entered complex-field targets retain the strict
-0.01% default, and either value can be changed explicitly.
+limit by default; manually entered complex-field targets use a strict but
+8-bit-attainable 0.1% default, and either value can be changed explicitly.
 Image-pattern import preserves the full source canvas by default so an
 intentionally off-axis pattern is not silently recentered onto the undiffracted
 zero order. It also maps that canvas across the calibrated non-aliased Fourier

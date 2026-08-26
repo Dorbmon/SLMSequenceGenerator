@@ -8,6 +8,11 @@ export interface OpticalTweezerInput {
   intensity: number;
 }
 
+// The browser exports an 8-bit phase frame. A 0.01% amplitude certificate is
+// below the quantized floor of the calibrated default four-trap frame
+// (~0.0785%), so use a strict but attainable default for the UI.
+export const DEFAULT_TWEEZER_AMPLITUDE_TOLERANCE_PERCENT = 0.1;
+
 export const DEFAULT_OPTICAL_TWEEZERS: readonly OpticalTweezerInput[] = [
   { trapId: 1, xUm: -4, yUm: -4, phaseRad: 0, intensity: 1 },
   { trapId: 2, xUm: 4, yUm: -4, phaseRad: 1.570796, intensity: 1 },

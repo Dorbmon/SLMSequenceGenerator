@@ -39,6 +39,7 @@ import {
 } from "../lib/resolution.js";
 import {
   DEFAULT_OPTICAL_TWEEZERS,
+  DEFAULT_TWEEZER_AMPLITUDE_TOLERANCE_PERCENT,
   cloneOpticalTweezers,
   nextTweezerId,
   parseOpticalTweezers,
@@ -87,7 +88,7 @@ const iterations = ref(4);
 const computeBackend = ref<ComputeBackend>("wasm");
 const targetPhaseMode = ref<TweezerTargetPhaseMode>("PHASE_LOCKED_WGS");
 const referencePhaseSeed = ref(1);
-const amplitudeTolerancePercent = ref(0.01);
+const amplitudeTolerancePercent = ref(DEFAULT_TWEEZER_AMPLITUDE_TOLERANCE_PERCENT);
 const wavelengthNm = ref(DEFAULT_WAVELENGTH_NM);
 const focalLengthMm = ref(DEFAULT_FOCAL_LENGTH_MM);
 const pixelPitchUm = ref(DEFAULT_PIXEL_PITCH_UM);
@@ -321,7 +322,7 @@ function reset(): void {
   computeBackend.value = "wasm";
   targetPhaseMode.value = "PHASE_LOCKED_WGS";
   referencePhaseSeed.value = 1;
-  amplitudeTolerancePercent.value = 0.01;
+  amplitudeTolerancePercent.value = DEFAULT_TWEEZER_AMPLITUDE_TOLERANCE_PERCENT;
   wavelengthNm.value = DEFAULT_WAVELENGTH_NM;
   focalLengthMm.value = DEFAULT_FOCAL_LENGTH_MM;
   pixelPitchUm.value = DEFAULT_PIXEL_PITCH_UM;
@@ -990,7 +991,7 @@ defineExpose({ reset });
             </label>
             <label class="tweezer-backend-choice tweezer-certificate-choice">MAX AMPLITUDE ERROR / %
               <input v-model.number="amplitudeTolerancePercent" type="number" min="0.0001" max="100" step="0.01" :disabled="running" @change="updateAmplitudeTolerance">
-              <small>EXPLICIT CERTIFICATE LIMIT / ACTUAL ERROR REMAINS VISIBLE IN METRICS</small>
+              <small>0.1% DEFAULT MATCHES 8-BIT PHASE QUANTIZATION / ACTUAL ERROR REMAINS VISIBLE</small>
             </label>
             <div class="control-block">
               <div class="control-label"><span>WGS ITERATIONS</span><output>{{ String(iterations).padStart(2, "0") }} / FRAME</output></div>
