@@ -23,10 +23,12 @@ import { wasmNudftSampleTargets, wasmNudftSynthesizePhase } from "./wasm-core.js
 // the non-convex solver into unrelated solutions at destructive cancellations.
 export const WGS_INITIALIZATION_CANCELLATION_RATIO = 1e-3;
 
-// Trap coefficients are strongly coupled after the phase-only projection.
-// A large multiplicative WGS step therefore creates a two-cycle even when the
-// configured gamma is otherwise reasonable for a full-plane GS solve.
+// Phase-locked trap coefficients are strongly coupled after the phase-only
+// projection. A large multiplicative WGS step therefore creates a two-cycle.
+// Reference/free-phase WGS follows the measured phase and can safely use the
+// configured feedback gain.
 export const WGS_MAX_STABLE_TRAP_AMPLITUDE_GAIN = 0.1;
+export const WGS_REFERENCE_TRAP_AMPLITUDE_GAIN = 0.85;
 export const WGS_LOCKED_PHASE_PRECOMPENSATION_GAIN = 0.7;
 export const WGS_SOFT_PHASE_PRECOMPENSATION_GAIN = 0.2;
 
@@ -64,15 +66,16 @@ export class SequentialWgsSolver {
 
   constructor(calibration: CalibrationPackage, config: HologramConfig | Required<HologramConfig> = {}) {
     this.calibration = calibration;
+    const targetPhaseMode = config.targetPhaseMode ?? "PHASE_LOCKED_WGS";
     this.config = {
       width: config.width ?? calibration.manifest.fftWidth ?? calibration.manifest.activeWidth,
       height: config.height ?? calibration.manifest.fftHeight ?? calibration.manifest.activeHeight,
       format: config.format ?? "UINT8",
-      targetPhaseMode: config.targetPhaseMode ?? "PHASE_LOCKED_WGS",
+      targetPhaseMode,
       firstFrameIterations: config.firstFrameIterations ?? 12,
       subsequentFrameIterations: config.subsequentFrameIterations ?? 4,
       maxIterations: config.maxIterations ?? 64,
-      gamma: config.gamma ?? 0.7,
+      gamma: config.gamma ?? (targetPhaseMode === "REFERENCE_WGS" ? WGS_REFERENCE_TRAP_AMPLITUDE_GAIN : 0.7),
       epsilon: config.epsilon ?? 1e-8,
       minWeight: config.minWeight ?? 0.1,
       maxWeight: config.maxWeight ?? 10,
@@ -132,7 +135,9 @@ export class SequentialWgsSolver {
     const desired = frame.traps.map((trap) => Math.sqrt(Math.max(0, trap.intensity)));
     const amplitudeTolerance = this.config.convergenceTolerance;
     const phaseTolerance = phaseConvergenceTolerance(this.config);
-    const amplitudeGain = Math.min(this.config.gamma, WGS_MAX_STABLE_TRAP_AMPLITUDE_GAIN);
+    const amplitudeGain = this.config.targetPhaseMode === "REFERENCE_WGS"
+      ? this.config.gamma
+      : Math.min(this.config.gamma, WGS_MAX_STABLE_TRAP_AMPLITUDE_GAIN);
     let best: QuantizedCandidate | undefined;
     let performedIterations = 0;
     let evaluated = this.evaluateQuantizedPhase(phase, targetX, targetY);

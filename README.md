@@ -55,8 +55,12 @@ tweezer coordinates, requested phases, and relative intensities. Inputs can be
 edited in the table or as JSON. It also accepts target-field images in two
 modes: isolated-spot mode converts connected components to centroids, while
 image-pattern mode samples text and other connected shapes into a spatially
-uniform point cloud. Integrated pixel signal seeds relative intensity, and
-imported phases start at zero for subsequent editing. The resulting 8-bit frame
+uniform point cloud. Optical-tweezer imports discard sparse edge bins, fit the
+detected foreground, auto-size the physical field from the calibrated aperture
+resolution, and consolidate samples that would address nearly identical Fourier
+modes. Uniform trap intensity and free output phase are the safe defaults;
+average image brightness and phase-locked JSON/table inputs remain available.
+The resulting 8-bit frame
 can be downloaded as raw pixels, a standards-compatible grayscale BMP, or with
 its JSON metadata. A forward-simulation panel accepts the exported indexed BMP
 or a raw U8 phase-code frame, applies the same uniform active aperture and
@@ -66,13 +70,18 @@ normalized intensity field can also be exported as a display BMP or Float32
 raw array. Forward propagation supports both Wasm and a GPU-resident WebGPU
 path.
 
-Focal-plane coordinates are not auto-fitted. Both workspaces expose the laser
+Manually entered focal-plane coordinates are never auto-fitted. Both workspaces expose the laser
 wavelength, Fourier-lens focal length, and SLM pixel pitch and use the physical
 Fraunhofer relation `u = x N p / (lambda f)` (with the image-row sign applied to
 `y`). The displayed field of view is the corresponding Nyquist interval. The
 single-frame workspace can also load a monotonic measured display-code-to-phase
 LUT from JSON, CSV, or plain text; without one, the UI explicitly identifies
 the phase response as an ideal linear 2π simulation.
+The single-frame workspace reports the rectangular-aperture first-null spacing,
+rejects unresolved trap pairs before computation, and exposes the maximum
+relative-amplitude error used by its certificate. Image patterns select a 10%
+limit by default; manually entered complex-field targets retain the strict
+0.01% default, and either value can be changed explicitly.
 
 Browser calculations run in a dedicated Web Worker. The interface, progress
 animations, navigation, and elapsed-time display remain responsive while Wasm

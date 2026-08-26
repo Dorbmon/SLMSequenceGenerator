@@ -33,6 +33,7 @@ export type TargetImageWorkerResponse =
       effectiveSpacingPx: number;
       discardedSmallComponents: number;
       discardedLargeComponents: number;
+      discardedSparseBins: number;
       discardedByLimit: number;
       elapsedMs: number;
     }

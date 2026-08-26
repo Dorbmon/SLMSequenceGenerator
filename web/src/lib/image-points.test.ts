@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   detectImagePoints,
+  imagePointBounds,
   mapImagePointsToField,
+  recommendPatternFieldSize,
+  selectResolvableImagePoints,
   type SpotDetectionOptions,
 } from "./image-points.js";
 
@@ -96,6 +99,23 @@ describe("target-field image detection", () => {
     expect(Math.max(...result.points.map((point) => point.xPx))).toBeGreaterThan(15);
   });
 
+  it("removes sparse grid slivers even when their connected stroke is valid", () => {
+    const image = rgbaImage(8, 4, 0);
+    fill(image, 8, 1, 1, 4, 1, 255);
+
+    const result = detectImagePoints(image, 8, 4, {
+      ...defaults,
+      mode: "PATTERN",
+      threshold: 0.2,
+      minimumAreaPx: 2,
+      patternSpacingPx: 4,
+    });
+
+    expect(result.points).toHaveLength(1);
+    expect(result.points[0]?.areaPx).toBe(3);
+    expect(result.discardedSparseBins).toBe(1);
+  });
+
   it("maps pixel centers into a centered micrometer field with +y up", () => {
     const points = mapImagePointsToField([
       { xPx: 0, yPx: 0, areaPx: 2, peakSignal: 255, integratedSignal: 10 },
@@ -109,7 +129,46 @@ describe("target-field image detection", () => {
       { xUm: 10, yUm: -6 },
     ]);
   });
+
+  it("fits foreground bounds and recommends an optically resolved field", () => {
+    const detections = [
+      point(10, 20, 20),
+      point(30, 40, 30),
+    ];
+    const bounds = imagePointBounds(detections);
+    expect(bounds).toEqual({ minX: 10, maxX: 30, minY: 20, maxY: 40 });
+
+    const mapped = mapImagePointsToField(detections, 64, 64, 20, 10, bounds!);
+    expect(mapped.map(({ xUm, yUm }) => ({ xUm, yUm }))).toEqual([
+      { xUm: -10, yUm: 5 },
+      { xUm: 10, yUm: -5 },
+    ]);
+    expect(recommendPatternFieldSize(
+      { minX: 0, maxX: 100, minY: 0, maxY: 20 },
+      5,
+      1.5,
+      2,
+    )).toEqual({ widthUm: 50, heightUm: 10 });
+  });
+
+  it("keeps the strongest representative from an unresolved cluster", () => {
+    const candidates = [
+      { ...point(1, 1, 10), xUm: 0, yUm: 0 },
+      { ...point(2, 1, 40), xUm: 0.2, yUm: 0 },
+      { ...point(8, 1, 20), xUm: 2, yUm: 0 },
+    ];
+
+    const result = selectResolvableImagePoints(candidates, 1, 1);
+
+    expect(result.points.map((candidate) => candidate.xUm)).toEqual([0.2, 2]);
+    expect(result.discardedByResolution).toBe(1);
+    expect(result.closestNormalizedSeparation).toBeCloseTo(1.8);
+  });
 });
+
+function point(xPx: number, yPx: number, integratedSignal: number) {
+  return { xPx, yPx, areaPx: 4, peakSignal: 255, integratedSignal };
+}
 
 function rgbaImage(width: number, height: number, intensity: number): Uint8ClampedArray {
   const image = new Uint8ClampedArray(width * height * 4);

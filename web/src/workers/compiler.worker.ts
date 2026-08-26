@@ -8,7 +8,10 @@ import {
   type SequentialHologramBackend,
 } from "../../../src/index.js";
 import { opticalTweezersToFrame } from "../lib/tweezers.js";
-import { createOpticalCalibration } from "../lib/optical-calibration.js";
+import {
+  analyzeOpticalTrapResolution,
+  createOpticalCalibration,
+} from "../lib/optical-calibration.js";
 import {
   inspectWebGpu,
   WebGpuSequentialWgsSolver,
@@ -125,7 +128,19 @@ async function compileSequence(jobId: number, input: SequenceWorkerInput): Promi
 
 async function generateTweezerFrame(jobId: number, input: TweezerFrameWorkerInput): Promise<void> {
   const started = performance.now();
+  if (!Number.isFinite(input.convergenceTolerance) || input.convergenceTolerance <= 0 || input.convergenceTolerance > 1) {
+    throw new Error("Amplitude convergence tolerance must be greater than zero and no more than one");
+  }
   const calibration = tweezerCalibration(input);
+  const resolution = analyzeOpticalTrapResolution(input.tweezers, calibration, input.fftWidth, input.fftHeight);
+  if (resolution.unresolvedPairCount > 0 && resolution.worstPair) {
+    const first = input.tweezers[resolution.worstPair.firstIndex]!;
+    const second = input.tweezers[resolution.worstPair.secondIndex]!;
+    throw new Error(
+      `Traps ${first.trapId} and ${second.trapId} are not independently resolvable `
+      + `(mode correlation ${resolution.worstPair.correlation.toFixed(4)})`,
+    );
+  }
   const config = {
     width: input.fftWidth,
     height: input.fftHeight,
@@ -133,7 +148,8 @@ async function generateTweezerFrame(jobId: number, input: TweezerFrameWorkerInpu
     firstFrameIterations: input.iterations,
     subsequentFrameIterations: input.iterations,
     maxIterations: input.iterations,
-    targetPhaseMode: "PHASE_LOCKED_WGS",
+    targetPhaseMode: input.targetPhaseMode,
+    convergenceTolerance: input.convergenceTolerance,
     backgroundPolicy: "ZERO",
     requireConvergence: false,
     measureSolveTime: true,

@@ -5,6 +5,7 @@ import {
   type FrameMetrics,
   WGS_LOCKED_PHASE_PRECOMPENSATION_GAIN,
   WGS_MAX_STABLE_TRAP_AMPLITUDE_GAIN,
+  WGS_REFERENCE_TRAP_AMPLITUDE_GAIN,
 } from "../../../src/index.js";
 import ComputationActivity from "../components/ComputationActivity.vue";
 import ForwardSimulator from "../components/ForwardSimulator.vue";
@@ -13,10 +14,12 @@ import TargetImageImporter from "../components/TargetImageImporter.vue";
 import { encodeGrayscaleBmp } from "../lib/bmp.js";
 import {
   createOpticalCalibration,
+  analyzeOpticalTrapResolution,
   DEFAULT_FOCAL_LENGTH_MM,
   DEFAULT_PIXEL_PITCH_UM,
   DEFAULT_WAVELENGTH_NM,
   opticalFieldOfViewUm,
+  opticalFirstNullResolutionUm,
   parsePhaseResponseLut,
   validateOpticalCalibration,
   type OpticalCalibrationInput,
@@ -45,6 +48,7 @@ import type {
 
 type JsonStatus = "synced" | "dirty" | "invalid";
 type OutputState = "idle" | "running" | "accepted" | "warning" | "rejected" | "cancelled";
+type TweezerTargetPhaseMode = "REFERENCE_WGS" | "PHASE_LOCKED_WGS";
 
 interface TargetImageImporterHandle {
   reset(): void;
@@ -70,6 +74,8 @@ const slmWidth = ref(DEFAULT_SLM_WIDTH);
 const slmHeight = ref(DEFAULT_SLM_HEIGHT);
 const iterations = ref(4);
 const computeBackend = ref<ComputeBackend>("wasm");
+const targetPhaseMode = ref<TweezerTargetPhaseMode>("PHASE_LOCKED_WGS");
+const amplitudeTolerancePercent = ref(0.01);
 const wavelengthNm = ref(DEFAULT_WAVELENGTH_NM);
 const focalLengthMm = ref(DEFAULT_FOCAL_LENGTH_MM);
 const pixelPitchUm = ref(DEFAULT_PIXEL_PITCH_UM);
@@ -101,6 +107,16 @@ const opticalCalibrationInput = computed<OpticalCalibrationInput>(() => ({
 const fieldOfViewUm = computed(() => {
   try {
     return opticalFieldOfViewUm(opticalCalibrationInput.value);
+  } catch {
+    return null;
+  }
+});
+const opticalResolution = computed(() => {
+  try {
+    return opticalFirstNullResolutionUm({
+      activeWidth: slmWidth.value,
+      activeHeight: slmHeight.value,
+    }, opticalCalibrationInput.value);
   } catch {
     return null;
   }
@@ -237,6 +253,9 @@ function applyImageTweezers(
   }));
   jsonDraft.value = serializeOpticalTweezers(tweezers.value);
   jsonStatus.value = "synced";
+  targetPhaseMode.value = "REFERENCE_WGS";
+  amplitudeTolerancePercent.value = 10;
+  iterations.value = Math.max(iterations.value, 12);
   invalidateOutput();
   nextTick(() => { suppressTableSync = false; });
   complete(true);
@@ -254,6 +273,8 @@ function reset(): void {
   slmHeight.value = DEFAULT_SLM_HEIGHT;
   iterations.value = 4;
   computeBackend.value = "wasm";
+  targetPhaseMode.value = "PHASE_LOCKED_WGS";
+  amplitudeTolerancePercent.value = 0.01;
   wavelengthNm.value = DEFAULT_WAVELENGTH_NM;
   focalLengthMm.value = DEFAULT_FOCAL_LENGTH_MM;
   pixelPitchUm.value = DEFAULT_PIXEL_PITCH_UM;
@@ -306,6 +327,21 @@ function updateComputeBackend(event: Event): void {
   invalidateOutput();
 }
 
+function updateTargetPhaseMode(event: Event): void {
+  targetPhaseMode.value = (event.target as HTMLSelectElement).value as TweezerTargetPhaseMode;
+  invalidateOutput();
+}
+
+function updateAmplitudeTolerance(): void {
+  if (!Number.isFinite(amplitudeTolerancePercent.value) ||
+      amplitudeTolerancePercent.value <= 0 || amplitudeTolerancePercent.value > 100) {
+    errorMessage.value = "Amplitude certificate tolerance must be greater than 0% and no more than 100%";
+    outputState.value = "rejected";
+    return;
+  }
+  invalidateOutput();
+}
+
 function calibrationFor(): CalibrationPackage {
   return createOpticalCalibration({
     activeWidth: slmWidth.value,
@@ -351,9 +387,21 @@ function generateFrame(): void {
   if (running.value) return;
   const input = validatedTweezers();
   if (!input) return;
+  let calibration: CalibrationPackage;
   try {
     validateOpticalCalibration(opticalCalibrationInput.value);
-    calibrationFor();
+    updateAmplitudeToleranceValue();
+    calibration = calibrationFor();
+    const resolution = analyzeOpticalTrapResolution(input, calibration, fftWidth.value, fftHeight.value);
+    if (resolution.unresolvedPairCount > 0 && resolution.worstPair) {
+      const first = input[resolution.worstPair.firstIndex]!;
+      const second = input[resolution.worstPair.secondIndex]!;
+      throw new Error(
+        `Traps ${first.trapId} and ${second.trapId} are not independently resolvable under the current calibration `
+        + `(mode correlation ${resolution.worstPair.correlation.toFixed(4)}, separation ${resolution.worstPair.distanceUm.toFixed(4)} µm). `
+        + "Increase their separation, enlarge the image field, or correct the optical calibration.",
+      );
+    }
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : "Invalid optical calibration";
     outputState.value = "rejected";
@@ -412,11 +460,20 @@ function generateFrame(): void {
       fftWidth: fftWidth.value,
       fftHeight: fftHeight.value,
       iterations: iterations.value,
+      targetPhaseMode: targetPhaseMode.value,
+      convergenceTolerance: amplitudeTolerancePercent.value / 100,
       backend: computeBackend.value,
       opticalCalibration: opticalCalibrationInput.value,
     },
   };
   worker.postMessage(request);
+}
+
+function updateAmplitudeToleranceValue(): void {
+  if (!Number.isFinite(amplitudeTolerancePercent.value) ||
+      amplitudeTolerancePercent.value <= 0 || amplitudeTolerancePercent.value > 100) {
+    throw new Error("Amplitude certificate tolerance must be greater than 0% and no more than 100%");
+  }
 }
 
 function convergenceWarning(metric: FrameMetrics): string {
@@ -434,7 +491,8 @@ function convergenceWarning(metric: FrameMetrics): string {
     );
   }
   const detail = failed.length > 0 ? failed.join("; ") : "the configured convergence gates";
-  return `The best frame was retained, but it is not certified: ${detail}. Increase the iteration budget or revise the optical target.`;
+  return `The best exportable frame was retained, but it is not certified: ${detail}. `
+    + "The requested tolerance was not reached; inspect trap spacing and intensity, or increase the iteration budget.";
 }
 
 function rejectFrame(message: string, jobId: number, worker: Worker): void {
@@ -534,9 +592,15 @@ function exportMetadata(): void {
     solver: {
       backend: resultBackendId.value,
       requestedIterations: iterations.value,
+      targetPhaseMode: targetPhaseMode.value,
+      amplitudeConvergenceTolerance: amplitudeTolerancePercent.value / 100,
       backgroundPolicy: "ZERO",
-      effectiveAmplitudeFeedbackGain: WGS_MAX_STABLE_TRAP_AMPLITUDE_GAIN,
-      phasePrecompensationGain: WGS_LOCKED_PHASE_PRECOMPENSATION_GAIN,
+      effectiveAmplitudeFeedbackGain: targetPhaseMode.value === "REFERENCE_WGS"
+        ? WGS_REFERENCE_TRAP_AMPLITUDE_GAIN
+        : WGS_MAX_STABLE_TRAP_AMPLITUDE_GAIN,
+      phasePrecompensationGain: targetPhaseMode.value === "REFERENCE_WGS"
+        ? 0
+        : WGS_LOCKED_PHASE_PRECOMPENSATION_GAIN,
       retainBestQuantizedCandidate: true,
       elapsedMs: elapsedMs.value,
     },
@@ -635,12 +699,14 @@ defineExpose({ reset });
 
         <div class="data-subbar target-image-subbar tweezer-image-subbar">
           <span>IMAGE INPUT / OPTICAL TWEEZERS</span>
-          <span>SPOT POWER → RELATIVE INTENSITY / PHASE 0</span>
+          <span>FOREGROUND FIT / RESOLUTION SAFE / FREE PHASE</span>
         </div>
         <TargetImageImporter
           ref="targetImageImporter"
           destination="tweezers"
           :disabled="running"
+          :minimum-separation-x-um="opticalResolution?.xUm ?? 0"
+          :minimum-separation-y-um="opticalResolution?.yUm ?? 0"
           @apply="applyImageTweezers"
         />
 
@@ -717,7 +783,8 @@ defineExpose({ reset });
                 </label>
               </div>
               <p class="tweezer-calibration-note">
-                FOCAL-PLANE FOV {{ fieldOfViewUm === null ? "INVALID" : `${fieldOfViewUm.toFixed(1)} × ${fieldOfViewUm.toFixed(1)} UM` }} / NO AUTO-FIT
+                FOCAL-PLANE FOV {{ fieldOfViewUm === null ? "INVALID" : `${fieldOfViewUm.toFixed(1)} × ${fieldOfViewUm.toFixed(1)} UM` }}
+                <template v-if="opticalResolution"> / FIRST-NULL {{ opticalResolution.xUm.toFixed(3) }} × {{ opticalResolution.yUm.toFixed(3) }} UM</template>
               </p>
               <div class="phase-lut-actions">
                 <button type="button" :disabled="running" @click="calibrationUpload?.click()">
@@ -736,6 +803,17 @@ defineExpose({ reset });
                 <option value="webgpu" :disabled="!webgpuAvailable">WebGPU / GPU-resident exact NUDFT</option>
               </select>
               <small :class="{ 'is-available': webgpuAvailable }">{{ webgpuStatus }}</small>
+            </label>
+            <label class="tweezer-backend-choice">TARGET PHASE CONSTRAINT
+              <select :value="targetPhaseMode" :disabled="running" @change="updateTargetPhaseMode">
+                <option value="PHASE_LOCKED_WGS">Use phases from the table / JSON</option>
+                <option value="REFERENCE_WGS">Free phase / intensity-only target</option>
+              </select>
+              <small>{{ targetPhaseMode === "REFERENCE_WGS" ? "OUTPUT PHASES FLOAT TO IMPROVE PATTERN UNIFORMITY" : "EVERY REQUESTED PHASE IS INCLUDED IN CERTIFICATION" }}</small>
+            </label>
+            <label class="tweezer-backend-choice tweezer-certificate-choice">MAX AMPLITUDE ERROR / %
+              <input v-model.number="amplitudeTolerancePercent" type="number" min="0.0001" max="100" step="0.01" :disabled="running" @change="updateAmplitudeTolerance">
+              <small>EXPLICIT CERTIFICATE LIMIT / ACTUAL ERROR REMAINS VISIBLE IN METRICS</small>
             </label>
             <div class="control-block">
               <div class="control-label"><span>WGS ITERATIONS</span><output>{{ String(iterations).padStart(2, "0") }} / FRAME</output></div>
@@ -768,7 +846,7 @@ defineExpose({ reset });
       <div><small>CALCULATION TIME</small><strong>{{ elapsedMs === null ? "--" : `${(elapsedMs / 1000).toFixed(2)}s` }}</strong></div>
       <div><small>DIFFRACTION EFFICIENCY</small><strong>{{ metrics ? `${(metrics.diffractionEfficiency * 100).toFixed(1)}%` : "--" }}</strong></div>
       <div><small>MAX AMPLITUDE ERROR</small><strong>{{ metrics ? `${(metrics.maximumRelativeAmplitudeError * 100).toFixed(4)}%` : "--" }}</strong></div>
-      <div><small>MAX PHASE ERROR</small><strong>{{ metrics ? `${metrics.maximumTargetPhaseErrorRad.toFixed(2)} rad` : "--" }}</strong></div>
+      <div><small>MAX PHASE ERROR</small><strong>{{ targetPhaseMode === "REFERENCE_WGS" ? "FREE" : metrics ? `${metrics.maximumTargetPhaseErrorRad.toFixed(2)} rad` : "--" }}</strong></div>
     </div>
 
     <ForwardSimulator

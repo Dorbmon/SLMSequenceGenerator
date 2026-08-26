@@ -13,6 +13,7 @@ import {
   WGS_INITIALIZATION_CANCELLATION_RATIO,
   WGS_LOCKED_PHASE_PRECOMPENSATION_GAIN,
   WGS_MAX_STABLE_TRAP_AMPLITUDE_GAIN,
+  WGS_REFERENCE_TRAP_AMPLITUDE_GAIN,
   WGS_SOFT_PHASE_PRECOMPENSATION_GAIN,
   wrapPhase,
 } from "../../../src/index.js";
@@ -692,15 +693,16 @@ function normalizeConfig(
   calibration: CalibrationPackage,
   config: HologramConfig | Required<HologramConfig>,
 ): Required<HologramConfig> {
+  const targetPhaseMode = config.targetPhaseMode ?? "PHASE_LOCKED_WGS";
   return {
     width: config.width ?? calibration.manifest.fftWidth ?? calibration.manifest.activeWidth,
     height: config.height ?? calibration.manifest.fftHeight ?? calibration.manifest.activeHeight,
     format: config.format ?? "UINT8",
-    targetPhaseMode: config.targetPhaseMode ?? "PHASE_LOCKED_WGS",
+    targetPhaseMode,
     firstFrameIterations: config.firstFrameIterations ?? 12,
     subsequentFrameIterations: config.subsequentFrameIterations ?? 4,
     maxIterations: config.maxIterations ?? 64,
-    gamma: config.gamma ?? 0.7,
+    gamma: config.gamma ?? (targetPhaseMode === "REFERENCE_WGS" ? WGS_REFERENCE_TRAP_AMPLITUDE_GAIN : 0.7),
     epsilon: config.epsilon ?? 1e-8,
     minWeight: config.minWeight ?? 0.1,
     maxWeight: config.maxWeight ?? 10,
@@ -1445,6 +1447,11 @@ fn update_controls(@builtin(global_invocation_id) gid: vec3<u32>) {
     denominator = denominator + desired * desired;
   }
   let scale = select(1.0, numerator / denominator, denominator > params.epsilon);
+  let amplitudeGain = select(
+    min(params.gamma, ${WGS_MAX_STABLE_TRAP_AMPLITUDE_GAIN}),
+    params.gamma,
+    params.phaseMode == 0u,
+  );
   var weightSum = 0.0;
   for (var index = 0u; index < params.targetCount; index = index + 1u) {
     let desired = targetInputs[index].desired;
@@ -1453,7 +1460,7 @@ fn update_controls(@builtin(global_invocation_id) gid: vec3<u32>) {
       let measuredAmplitude = sqrt(max(0.0, targetStates[index].intensity));
       let ratio = scale * desired / (measuredAmplitude + params.epsilon);
       weight = clamp(
-        weight * pow(ratio, min(params.gamma, ${WGS_MAX_STABLE_TRAP_AMPLITUDE_GAIN})),
+        weight * pow(ratio, amplitudeGain),
         params.minWeight,
         params.maxWeight,
       );

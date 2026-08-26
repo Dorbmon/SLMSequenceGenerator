@@ -2,8 +2,12 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import ComputationActivity from "./ComputationActivity.vue";
 import {
+  imagePointBounds,
   mapImagePointsToField,
+  recommendPatternFieldSize,
+  selectResolvableImagePoints,
   type DetectedImagePoint,
+  type ImagePointBoundsPx,
   type ImageExtractionMode,
   type SpotDetectionOptions,
   type SpotPolarity,
@@ -19,11 +23,17 @@ interface ImportedTargetPoint {
   relativeIntensity: number;
 }
 
+type ImageIntensityMode = "UNIFORM" | "IMAGE_BRIGHTNESS";
+
 const props = withDefaults(defineProps<{
   disabled: boolean;
   destination?: "targets" | "tweezers";
+  minimumSeparationXUm?: number;
+  minimumSeparationYUm?: number;
 }>(), {
   destination: "targets",
+  minimumSeparationXUm: 0,
+  minimumSeparationYUm: 0,
 });
 
 const emit = defineEmits<{
@@ -44,9 +54,12 @@ const analysisHeight = ref(0);
 const fieldWidthUm = ref(20);
 const fieldHeightUm = ref(20);
 const extractionMode = ref<ImageExtractionMode>(props.destination === "tweezers" ? "PATTERN" : "CENTROIDS");
+const intensityMode = ref<ImageIntensityMode>(props.destination === "tweezers" ? "UNIFORM" : "IMAGE_BRIGHTNESS");
+const fitForeground = ref(props.destination === "tweezers");
+const autoScaleField = ref(props.destination === "tweezers");
 const thresholdPercent = ref(props.destination === "tweezers" ? 20 : 62);
 const minimumAreaPx = ref(3);
-const maximumPoints = ref(256);
+const maximumPoints = ref(props.destination === "tweezers" ? 128 : 256);
 const patternSpacingPx = ref(2);
 const polarity = ref<SpotPolarity>("BRIGHT");
 const detections = ref<DetectedImagePoint[]>([]);
@@ -57,6 +70,7 @@ const elapsedMs = ref(0);
 const thresholdSignal = ref(0);
 const discardedSmall = ref(0);
 const discardedLarge = ref(0);
+const discardedSparseBins = ref(0);
 const discardedByLimit = ref(0);
 const sourcePixelCount = ref(0);
 const effectiveSpacingPx = ref(0);
@@ -75,21 +89,68 @@ const mappingValid = computed(() => (
   && Number.isFinite(fieldHeightUm.value)
   && fieldHeightUm.value > 0
 ));
+const foregroundBounds = computed<ImagePointBoundsPx | null>(() => imagePointBounds(
+  detections.value,
+  extractionMode.value === "PATTERN" ? effectiveSpacingPx.value / 2 : 0,
+  analysisWidth.value || undefined,
+  analysisHeight.value || undefined,
+));
+const mappingBounds = computed(() => fitForeground.value ? foregroundBounds.value ?? undefined : undefined);
+const mappedImagePoints = computed(() => {
+  if (!mappingValid.value || detections.value.length === 0) return [];
+  return mapImagePointsToField(
+    detections.value,
+    analysisWidth.value,
+    analysisHeight.value,
+    fieldWidthUm.value,
+    fieldHeightUm.value,
+    mappingBounds.value,
+  );
+});
+const resolvablePoints = computed(() => (
+  props.destination === "tweezers" && extractionMode.value === "PATTERN"
+    ? selectResolvableImagePoints(
+      mappedImagePoints.value,
+      props.minimumSeparationXUm,
+      props.minimumSeparationYUm,
+    )
+    : {
+      points: mappedImagePoints.value,
+      discardedByResolution: 0,
+      closestNormalizedSeparation: Number.POSITIVE_INFINITY,
+    }
+));
+const preparedPoints = computed<ImportedTargetPoint[]>(() => {
+  const selected = resolvablePoints.value.points;
+  const maximumSignal = Math.max(1, ...selected.map(pointBrightness));
+  return selected.map(({ xUm, yUm, ...point }) => ({
+    xUm,
+    yUm,
+    relativeIntensity: intensityMode.value === "UNIFORM"
+      ? 1
+      : Math.max(0.001, pointBrightness(point) / maximumSignal),
+  }));
+});
 const analysisWasReduced = computed(() => (
   sourceWidth.value !== analysisWidth.value || sourceHeight.value !== analysisHeight.value
 ));
 const pointSummary = computed(() => {
   if (running.value) return "ANALYZING";
   if (!hasImage.value) return "NO IMAGE";
-  return `${detections.value.length} POINT${detections.value.length === 1 ? "" : "S"}`;
+  const count = preparedPoints.value.length;
+  return `${count} READY${count === detections.value.length ? "" : ` / ${detections.value.length} SAMPLED`}`;
 });
 const discardedSummary = computed(() => {
   if (extractionMode.value === "PATTERN") {
     const noise = discardedSmall.value > 0
       ? ` · ${discardedSmall.value} noise component${discardedSmall.value === 1 ? "" : "s"} removed`
       : "";
+    const sparse = discardedSparseBins.value > 0 ? ` · ${discardedSparseBins.value} sparse bins removed` : "";
+    const unresolved = resolvablePoints.value.discardedByResolution > 0
+      ? ` · ${resolvablePoints.value.discardedByResolution} unresolved samples consolidated`
+      : "";
     const consolidated = discardedByLimit.value > 0 ? " · density reduced to point limit" : "";
-    return `${sourcePixelCount.value} foreground px · ${effectiveSpacingPx.value}px sampling${noise}${consolidated}`;
+    return `${sourcePixelCount.value} foreground px · ${effectiveSpacingPx.value}px sampling${noise}${sparse}${consolidated}${unresolved}`;
   }
   const discarded = discardedSmall.value + discardedLarge.value + discardedByLimit.value;
   return discarded > 0 ? `${discarded} component${discarded === 1 ? "" : "s"} filtered` : "No extra components filtered";
@@ -217,12 +278,14 @@ function startDetector(image: ImageData): void {
     thresholdSignal.value = response.thresholdSignal;
     discardedSmall.value = response.discardedSmallComponents;
     discardedLarge.value = response.discardedLargeComponents;
+    discardedSparseBins.value = response.discardedSparseBins;
     discardedByLimit.value = response.discardedByLimit;
     sourcePixelCount.value = response.sourcePixelCount;
     effectiveSpacingPx.value = response.effectiveSpacingPx;
     elapsedMs.value = response.elapsedMs;
     running.value = false;
     errorMessage.value = "";
+    applyAutomaticFieldSize();
     drawPreview();
   };
   worker.onerror = (event: ErrorEvent) => {
@@ -273,7 +336,7 @@ function drawPreview(): void {
   if (!previewContext) return;
   previewContext.drawImage(sourceCanvas, 0, 0);
   const scale = Math.max(1, Math.min(canvas.width, canvas.height) / 420);
-  detections.value.forEach((point, index) => {
+  resolvablePoints.value.points.forEach((point, index) => {
     const pattern = extractionMode.value === "PATTERN";
     const radius = pattern
       ? Math.max(1.4 * scale, effectiveSpacingPx.value * 0.32)
@@ -304,24 +367,12 @@ function drawPreview(): void {
 }
 
 function applyDetectedTargets(): void {
-  if (props.disabled || running.value || detections.value.length === 0) return;
+  if (props.disabled || running.value || preparedPoints.value.length === 0) return;
   if (!mappingValid.value) {
     showError("Image field width and height must be positive numbers");
     return;
   }
-  const mapped = mapImagePointsToField(
-    detections.value,
-    analysisWidth.value,
-    analysisHeight.value,
-    fieldWidthUm.value,
-    fieldHeightUm.value,
-  );
-  const maximumSignal = Math.max(1, ...mapped.map((point) => point.integratedSignal));
-  const points = mapped.map(({ xUm, yUm, integratedSignal }) => ({
-    xUm,
-    yUm,
-    relativeIntensity: Math.max(0.001, integratedSignal / maximumSignal),
-  }));
+  const points = preparedPoints.value;
   emit("apply", points, (accepted) => {
     if (accepted) {
       appliedCount.value = points.length;
@@ -349,13 +400,49 @@ function reset(): void {
   errorMessage.value = "";
   appliedCount.value = null;
   extractionMode.value = props.destination === "tweezers" ? "PATTERN" : "CENTROIDS";
+  intensityMode.value = props.destination === "tweezers" ? "UNIFORM" : "IMAGE_BRIGHTNESS";
+  fitForeground.value = props.destination === "tweezers";
+  autoScaleField.value = props.destination === "tweezers";
   thresholdPercent.value = props.destination === "tweezers" ? 20 : 62;
   minimumAreaPx.value = 3;
-  maximumPoints.value = 256;
+  maximumPoints.value = props.destination === "tweezers" ? 128 : 256;
   patternSpacingPx.value = 2;
   polarity.value = "BRIGHT";
   sourcePixelCount.value = 0;
   effectiveSpacingPx.value = 0;
+  discardedSmall.value = 0;
+  discardedLarge.value = 0;
+  discardedSparseBins.value = 0;
+  discardedByLimit.value = 0;
+}
+
+function applyAutomaticFieldSize(): void {
+  if (!autoScaleField.value || extractionMode.value !== "PATTERN") return;
+  const bounds = mappingBounds.value ?? (analysisWidth.value > 0 && analysisHeight.value > 0 ? {
+    minX: 0,
+    maxX: analysisWidth.value - 1,
+    minY: 0,
+    maxY: analysisHeight.value - 1,
+  } : null);
+  if (!bounds) return;
+  const recommendation = recommendPatternFieldSize(
+    bounds,
+    effectiveSpacingPx.value,
+    props.minimumSeparationXUm,
+    props.minimumSeparationYUm,
+  );
+  fieldWidthUm.value = recommendation.widthUm;
+  fieldHeightUm.value = recommendation.heightUm;
+  appliedCount.value = null;
+}
+
+function useManualFieldScale(): void {
+  autoScaleField.value = false;
+  appliedCount.value = null;
+}
+
+function pointBrightness(point: Pick<DetectedImagePoint, "integratedSignal" | "areaPx">): number {
+  return point.integratedSignal / Math.max(1, point.areaPx);
 }
 
 function terminateDetector(): void {
@@ -375,7 +462,15 @@ function roundedFieldSize(value: number): number {
 }
 
 watch([extractionMode, thresholdPercent, minimumAreaPx, maximumPoints, patternSpacingPx, polarity], scheduleDetection);
-watch([fieldWidthUm, fieldHeightUm], () => { appliedCount.value = null; });
+watch([intensityMode, fieldWidthUm, fieldHeightUm], () => {
+  appliedCount.value = null;
+  drawPreview();
+});
+watch([fitForeground, autoScaleField, () => props.minimumSeparationXUm, () => props.minimumSeparationYUm], () => {
+  applyAutomaticFieldSize();
+  appliedCount.value = null;
+  drawPreview();
+});
 
 onBeforeUnmount(() => {
   loadGeneration += 1;
@@ -421,7 +516,7 @@ defineExpose({ reset });
 
       <div class="target-image-controls">
         <div class="target-image-heading">
-          <div><span>POINT DETECTION</span><strong>{{ detections.length }} FOUND</strong></div>
+          <div><span>POINT DETECTION</span><strong>{{ preparedPoints.length }} READY</strong></div>
           <button type="button" :disabled="disabled" @click="reset">Remove image</button>
         </div>
 
@@ -436,6 +531,27 @@ defineExpose({ reset });
           <select v-model="polarity" :disabled="disabled">
             <option value="BRIGHT">Bright spots</option>
             <option value="DARK">Dark spots</option>
+          </select>
+        </label>
+
+        <label v-if="destination === 'tweezers'">TRAP INTENSITY
+          <select v-model="intensityMode" :disabled="disabled">
+            <option value="UNIFORM">Uniform optical tweezers</option>
+            <option value="IMAGE_BRIGHTNESS">Use average image brightness</option>
+          </select>
+        </label>
+
+        <label v-if="extractionMode === 'PATTERN'">PATTERN BOUNDS
+          <select v-model="fitForeground" :disabled="disabled">
+            <option :value="true">Fit detected foreground</option>
+            <option :value="false">Keep full image canvas</option>
+          </select>
+        </label>
+
+        <label v-if="extractionMode === 'PATTERN' && destination === 'tweezers'">PHYSICAL SCALE
+          <select v-model="autoScaleField" :disabled="disabled">
+            <option :value="true">Auto-size to optical resolution</option>
+            <option :value="false">Manual field dimensions</option>
           </select>
         </label>
 
@@ -456,13 +572,16 @@ defineExpose({ reset });
           </label>
         </div>
 
-        <div class="target-image-field-heading"><span>IMAGE FIELD / UM</span><small>CENTERED ORIGIN / +Y UP</small></div>
+        <div class="target-image-field-heading">
+          <span>IMAGE FIELD / UM</span>
+          <small>{{ autoScaleField ? "OPTICALLY RESOLVED / +Y UP" : "MANUAL / +Y UP" }}</small>
+        </div>
         <div class="target-image-number-grid">
           <label>WIDTH
-            <input v-model.number="fieldWidthUm" type="number" min="0.001" step="0.1" inputmode="decimal" :disabled="disabled">
+            <input v-model.number="fieldWidthUm" type="number" min="0.001" step="0.1" inputmode="decimal" :disabled="disabled" @input="useManualFieldScale">
           </label>
           <label>HEIGHT
-            <input v-model.number="fieldHeightUm" type="number" min="0.001" step="0.1" inputmode="decimal" :disabled="disabled">
+            <input v-model.number="fieldHeightUm" type="number" min="0.001" step="0.1" inputmode="decimal" :disabled="disabled" @input="useManualFieldScale">
           </label>
         </div>
 
@@ -483,10 +602,10 @@ defineExpose({ reset });
         <button
           class="apply-button target-image-apply"
           type="button"
-          :disabled="disabled || running || detections.length === 0 || !mappingValid"
+          :disabled="disabled || running || preparedPoints.length === 0 || !mappingValid"
           @click="applyDetectedTargets"
         >
-          {{ appliedCount === detections.length ? `${appliedCount} ${destinationCopy.applied} applied` : `Replace ${destinationCopy.applied} with ${detections.length} points` }}
+          {{ appliedCount === preparedPoints.length ? `${appliedCount} ${destinationCopy.applied} applied` : `Replace ${destinationCopy.applied} with ${preparedPoints.length} resolved points` }}
         </button>
       </div>
     </div>

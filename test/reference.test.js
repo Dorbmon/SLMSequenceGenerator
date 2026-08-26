@@ -183,6 +183,48 @@ test("generates a direct phase-locked optical tweezer frame", () => {
   assert.ok(result.metrics.maximumTargetPhaseErrorRad < 0.2);
 });
 
+test("uses full WGS amplitude feedback when target phases are free", () => {
+  const width = 64;
+  const referenceCalibration = calibration(width, width);
+  referenceCalibration.coordinateTransform = {
+    originXUm: width / 2,
+    originYUm: width / 2,
+    scaleX: 1,
+    scaleY: 1,
+  };
+  const frame = {
+    frameIndex: 0,
+    timeUs: 0,
+    traps: Array.from({ length: 8 }, (_, index) => ({
+      trapId: index + 1,
+      atomId: null,
+      xUm: Math.cos(index * Math.PI / 4) * 14,
+      yUm: Math.sin(index * Math.PI / 4) * 14,
+      intensity: 0.2 + (index % 4) * 0.25,
+      targetPhaseRad: 0,
+      flags: 0,
+    })),
+  };
+  const solve = (gamma) => new SequentialWgsSolver(referenceCalibration, {
+    width,
+    height: width,
+    firstFrameIterations: 6,
+    maxIterations: 6,
+    targetPhaseMode: "REFERENCE_WGS",
+    backgroundPolicy: "ZERO",
+    convergenceTolerance: 0.01,
+    ...(gamma === undefined ? {} : { gamma }),
+  }).solveSequentialFrame(frame);
+
+  const conservative = solve(0.1);
+  const normal = solve(0.7);
+  const defaultReference = solve(undefined);
+  const tunedReference = solve(0.85);
+  assert.ok(normal.metrics.maximumRelativeAmplitudeError < conservative.metrics.maximumRelativeAmplitudeError / 2);
+  assert.equal(normal.metrics.maximumTargetPhaseErrorRad, 0);
+  assert.deepEqual(defaultReference.pixels, tunedReference.pixels);
+});
+
 test("uses a seeded stable phase when the initial target superposition cancels", () => {
   const symmetricCalibration = calibration(64, 64);
   symmetricCalibration.coordinateTransform = {

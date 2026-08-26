@@ -28,7 +28,21 @@ export interface SpotDetectionResult {
   effectiveSpacingPx: number;
   discardedSmallComponents: number;
   discardedLargeComponents: number;
+  discardedSparseBins: number;
   discardedByLimit: number;
+}
+
+export interface ImagePointBoundsPx {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+}
+
+export interface ResolvableImagePointResult {
+  points: PhysicalImagePoint[];
+  discardedByResolution: number;
+  closestNormalizedSeparation: number;
 }
 
 export interface PhysicalImagePoint extends DetectedImagePoint {
@@ -158,6 +172,7 @@ export function detectImagePoints(
     effectiveSpacingPx: 0,
     discardedSmallComponents,
     discardedLargeComponents,
+    discardedSparseBins: 0,
     discardedByLimit,
   };
 }
@@ -218,7 +233,7 @@ function detectPatternPoints(
   }
 
   let effectiveSpacingPx = requestedSpacingPx;
-  let points = binPatternPixels(
+  let binned = binPatternPixels(
     signal,
     labels,
     componentAreas,
@@ -228,11 +243,13 @@ function detectPatternPoints(
     minimumAreaPx,
     effectiveSpacingPx,
   );
+  let points = binned.points;
+  let discardedSparseBins = binned.discardedSparseBins;
   const pointsAtRequestedSpacing = points.length;
   while (points.length > maximumPoints && effectiveSpacingPx < Math.max(width, height)) {
     const ratio = Math.sqrt(points.length / maximumPoints);
     effectiveSpacingPx = Math.max(effectiveSpacingPx + 1, Math.ceil(effectiveSpacingPx * ratio));
-    points = binPatternPixels(
+    binned = binPatternPixels(
       signal,
       labels,
       componentAreas,
@@ -242,6 +259,8 @@ function detectPatternPoints(
       minimumAreaPx,
       effectiveSpacingPx,
     );
+    points = binned.points;
+    discardedSparseBins = binned.discardedSparseBins;
   }
   if (points.length > maximumPoints) points = evenlyLimitPoints(points, maximumPoints);
 
@@ -255,6 +274,7 @@ function detectPatternPoints(
     effectiveSpacingPx,
     discardedSmallComponents,
     discardedLargeComponents: 0,
+    discardedSparseBins,
     discardedByLimit: Math.max(0, pointsAtRequestedSpacing - points.length),
   };
 }
@@ -268,7 +288,7 @@ function binPatternPixels(
   thresholdSignal: number,
   minimumAreaPx: number,
   spacingPx: number,
-): DetectedImagePoint[] {
+): { points: DetectedImagePoint[]; discardedSparseBins: number } {
   interface PatternBin {
     weightedX: number;
     weightedY: number;
@@ -300,7 +320,12 @@ function binPatternPixels(
     bin.areaPx += 1;
     bins.set(key, bin);
   }
-  return [...bins.values()]
+  const populated = [...bins.values()];
+  const points = populated
+    // A valid connected stroke can contribute a one-pixel sliver to a grid
+    // cell. It is not a stable optical target, even though its parent stroke
+    // passes the connected-component area check.
+    .filter((bin) => bin.areaPx >= minimumAreaPx)
     .map((bin) => ({
       xPx: bin.weightedX / bin.integratedSignal,
       yPx: bin.weightedY / bin.integratedSignal,
@@ -309,6 +334,10 @@ function binPatternPixels(
       integratedSignal: bin.integratedSignal,
     }))
     .sort((left, right) => left.yPx - right.yPx || left.xPx - right.xPx);
+  return {
+    points,
+    discardedSparseBins: populated.length - points.length,
+  };
 }
 
 function evenlyLimitPoints(points: DetectedImagePoint[], maximumPoints: number): DetectedImagePoint[] {
@@ -324,6 +353,7 @@ export function mapImagePointsToField(
   imageHeight: number,
   fieldWidthUm: number,
   fieldHeightUm: number,
+  sourceBounds?: ImagePointBoundsPx,
 ): PhysicalImagePoint[] {
   if (!Number.isFinite(fieldWidthUm) || fieldWidthUm <= 0 || !Number.isFinite(fieldHeightUm) || fieldHeightUm <= 0) {
     throw new Error("Image field width and height must be positive finite values");
@@ -331,13 +361,103 @@ export function mapImagePointsToField(
   if (!Number.isInteger(imageWidth) || imageWidth <= 0 || !Number.isInteger(imageHeight) || imageHeight <= 0) {
     throw new Error("Image dimensions must be positive integers");
   }
-  const xSpan = Math.max(1, imageWidth - 1);
-  const ySpan = Math.max(1, imageHeight - 1);
+  const bounds = sourceBounds ?? { minX: 0, maxX: imageWidth - 1, minY: 0, maxY: imageHeight - 1 };
+  validateBounds(bounds, imageWidth, imageHeight);
+  const xSpan = Math.max(1, bounds.maxX - bounds.minX);
+  const ySpan = Math.max(1, bounds.maxY - bounds.minY);
   return points.map((point) => ({
     ...point,
-    xUm: roundCoordinate((point.xPx / xSpan - 0.5) * fieldWidthUm),
-    yUm: roundCoordinate((0.5 - point.yPx / ySpan) * fieldHeightUm),
+    xUm: roundCoordinate(((point.xPx - bounds.minX) / xSpan - 0.5) * fieldWidthUm),
+    yUm: roundCoordinate((0.5 - (point.yPx - bounds.minY) / ySpan) * fieldHeightUm),
   }));
+}
+
+export function imagePointBounds(
+  points: readonly DetectedImagePoint[],
+  paddingPx = 0,
+  imageWidth?: number,
+  imageHeight?: number,
+): ImagePointBoundsPx | null {
+  if (points.length === 0) return null;
+  const padding = Number.isFinite(paddingPx) ? Math.max(0, paddingPx) : 0;
+  const minimumX = Math.min(...points.map((point) => point.xPx)) - padding;
+  const maximumX = Math.max(...points.map((point) => point.xPx)) + padding;
+  const minimumY = Math.min(...points.map((point) => point.yPx)) - padding;
+  const maximumY = Math.max(...points.map((point) => point.yPx)) + padding;
+  return {
+    minX: imageWidth === undefined ? minimumX : clamp(minimumX, 0, Math.max(0, imageWidth - 1)),
+    maxX: imageWidth === undefined ? maximumX : clamp(maximumX, 0, Math.max(0, imageWidth - 1)),
+    minY: imageHeight === undefined ? minimumY : clamp(minimumY, 0, Math.max(0, imageHeight - 1)),
+    maxY: imageHeight === undefined ? maximumY : clamp(maximumY, 0, Math.max(0, imageHeight - 1)),
+  };
+}
+
+export function recommendPatternFieldSize(
+  bounds: ImagePointBoundsPx,
+  effectiveSpacingPx: number,
+  minimumSeparationXUm: number,
+  minimumSeparationYUm: number,
+  minimumFieldWidthUm = 20,
+  safetyFactor = 1.25,
+): { widthUm: number; heightUm: number } {
+  const spanX = Math.max(1, bounds.maxX - bounds.minX);
+  const spanY = Math.max(1, bounds.maxY - bounds.minY);
+  const spacing = Math.max(1, effectiveSpacingPx);
+  const separation = Math.max(
+    positiveFiniteOrZero(minimumSeparationXUm),
+    positiveFiniteOrZero(minimumSeparationYUm),
+  );
+  const opticalScale = separation > 0 ? separation * Math.max(1, safetyFactor) / spacing : 0;
+  const scaleUmPerPx = Math.max(opticalScale, positiveFiniteOrZero(minimumFieldWidthUm) / spanX);
+  return {
+    widthUm: roundFieldSize(spanX * scaleUmPerPx),
+    heightUm: roundFieldSize(spanY * scaleUmPerPx),
+  };
+}
+
+export function selectResolvableImagePoints(
+  points: readonly PhysicalImagePoint[],
+  minimumSeparationXUm: number,
+  minimumSeparationYUm: number,
+): ResolvableImagePointResult {
+  const separationX = positiveFiniteOrZero(minimumSeparationXUm);
+  const separationY = positiveFiniteOrZero(minimumSeparationYUm);
+  if (points.length < 2 || separationX === 0 || separationY === 0) {
+    return {
+      points: [...points],
+      discardedByResolution: 0,
+      closestNormalizedSeparation: points.length < 2 ? Number.POSITIVE_INFINITY : 0,
+    };
+  }
+
+  const strongest = [...points].sort((left, right) => (
+    right.integratedSignal / Math.max(1, right.areaPx)
+    - left.integratedSignal / Math.max(1, left.areaPx)
+    || right.integratedSignal - left.integratedSignal
+    || left.yPx - right.yPx
+    || left.xPx - right.xPx
+  ));
+  const selected: PhysicalImagePoint[] = [];
+  for (const point of strongest) {
+    if (selected.every((existing) => normalizedSeparation(point, existing, separationX, separationY) >= 1)) {
+      selected.push(point);
+    }
+  }
+  selected.sort((left, right) => left.yPx - right.yPx || left.xPx - right.xPx);
+  let closestNormalizedSeparation = Number.POSITIVE_INFINITY;
+  for (let left = 0; left < selected.length; left += 1) {
+    for (let right = left + 1; right < selected.length; right += 1) {
+      closestNormalizedSeparation = Math.min(
+        closestNormalizedSeparation,
+        normalizedSeparation(selected[left]!, selected[right]!, separationX, separationY),
+      );
+    }
+  }
+  return {
+    points: selected,
+    discardedByResolution: points.length - selected.length,
+    closestNormalizedSeparation,
+  };
 }
 
 function validateImage(rgba: Uint8ClampedArray | Uint8Array, width: number, height: number): void {
@@ -349,12 +469,37 @@ function validateImage(rgba: Uint8ClampedArray | Uint8Array, width: number, heig
   }
 }
 
+function validateBounds(bounds: ImagePointBoundsPx, width: number, height: number): void {
+  if (![bounds.minX, bounds.maxX, bounds.minY, bounds.maxY].every(Number.isFinite) ||
+      bounds.minX > bounds.maxX || bounds.minY > bounds.maxY ||
+      bounds.minX < 0 || bounds.maxX > width - 1 || bounds.minY < 0 || bounds.maxY > height - 1) {
+    throw new Error("Image mapping bounds must be finite and inside the source image");
+  }
+}
+
+function normalizedSeparation(
+  first: PhysicalImagePoint,
+  second: PhysicalImagePoint,
+  separationX: number,
+  separationY: number,
+): number {
+  return Math.hypot((first.xUm - second.xUm) / separationX, (first.yUm - second.yUm) / separationY);
+}
+
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.max(minimum, Math.min(maximum, Number.isFinite(value) ? value : minimum));
 }
 
 function positiveInteger(value: number, fallback: number): number {
   return Number.isFinite(value) ? Math.max(1, Math.round(value)) : fallback;
+}
+
+function positiveFiniteOrZero(value: number): number {
+  return Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+
+function roundFieldSize(value: number): number {
+  return Math.max(0.001, Math.round(value * 1000) / 1000);
 }
 
 function roundCoordinate(value: number): number {
