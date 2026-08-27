@@ -18,7 +18,7 @@ import {
   WGS_SOFT_PHASE_PRECOMPENSATION_GAIN,
 } from "../../../src/wgs-constants.js";
 
-export const WEBGPU_WGS_BACKEND_ID = "webgpu-exact-nudft-phase-locked-wgs";
+export const WEBGPU_WGS_BACKEND_ID = "webgpu-exact-nudft-export-certified-wgs-v2";
 
 export interface WebGpuCapability {
   available: boolean;
@@ -52,7 +52,8 @@ type GeneralPipelineName =
   | "make_final_field"
   | "reduce_field"
   | "finish_reduction"
-  | "pack_active";
+  | "pack_active"
+  | "unpack_active";
 
 /**
  * Explicit per-entry-point resources. WebGPU's auto layouts reject both
@@ -78,6 +79,7 @@ export const WEBGPU_WGS_PIPELINE_BINDINGS: Readonly<Record<GeneralPipelineName, 
   reduce_field: [0, 8, 13, 14, 15, 18],
   finish_reduction: [0, 15, 16],
   pack_active: [0, 13, 17],
+  unpack_active: [0, 13, 17],
 };
 
 interface CandidateState {
@@ -85,6 +87,11 @@ interface CandidateState {
   targetCount: number;
   measuredPhases: Map<number, number>;
   measuredIntensities: Map<number, number>;
+}
+
+interface OptimizerSnapshot {
+  currentScore: number;
+  performedIterations: number;
 }
 
 interface ExpandedCalibration {
@@ -203,9 +210,18 @@ export class WebGpuSequentialWgsSolver implements SequentialHologramBackend {
       bestCodes: device.createBuffer({ label: "WGS best display codes", size: scalarBytes, usage: storage }),
       acceptedCodes: device.createBuffer({ label: "WGS accepted display codes", size: scalarBytes, usage: storage | copyDestination }),
       optimizer: device.createBuffer({ label: "WGS optimizer state", size: 32, usage: storage | copySource }),
+      optimizerReadback: device.createBuffer({
+        label: "WGS optimizer readback",
+        size: 32,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      }),
       partialMetrics: device.createBuffer({ label: "WGS metric partials", size: this.partialCount * 16, usage: storage }),
       summary: device.createBuffer({ label: "WGS metric summary", size: 16, usage: storage | copySource }),
-      packed: device.createBuffer({ label: "WGS packed active frame", size: this.packedByteLength, usage: storage | copySource }),
+      packed: device.createBuffer({
+        label: "WGS packed active frame",
+        size: this.packedByteLength,
+        usage: storage | copySource | copyDestination,
+      }),
       supportMask: device.createBuffer({ label: "WGS target support mask", size: scalarBytes, usage: storage }),
     };
 
@@ -265,80 +281,166 @@ export class WebGpuSequentialWgsSolver implements SequentialHologramBackend {
     if (targetInput.byteLength > 0) this.device.queue.writeBuffer(this.buffers.targetInput!, 0, targetInput);
     this.device.queue.writeBuffer(this.buffers.frameParams!, 0, this.serializeFrameParameters(targetCount));
 
-    const encoder = this.device.createCommandEncoder({ label: `WGS frame ${frame.frameIndex}` });
-    this.dispatch(encoder, "initialize_targets", targetCount, TARGET_WORKGROUP_SIZE);
-    this.dispatch(encoder, "initialize_optimizer", 1, 1);
-    this.dispatch(encoder, "initialize_phase", this.pixelCount);
-    this.dispatch(encoder, "quantize_codes", this.pixelCount);
-    this.dispatch(encoder, "make_final_field", this.pixelCount);
-    this.dispatch(encoder, "sample_targets", targetCount * EXACT_TARGET_WORKGROUP_SIZE, EXACT_TARGET_WORKGROUP_SIZE);
-    this.dispatch(encoder, "evaluate_candidate", 1, 1);
-    this.dispatch(encoder, "save_best_phase_codes", this.pixelCount);
-    this.dispatch(encoder, "save_best_targets", targetCount, TARGET_WORKGROUP_SIZE);
-    for (let iteration = 0; iteration < iterations; iteration += 1) {
-      this.dispatch(encoder, "update_controls", 1, 1);
-      this.dispatch(encoder, "synthesize_phase", this.pixelCount);
-      this.dispatch(encoder, "quantize_codes", this.pixelCount);
-      this.dispatch(encoder, "make_final_field", this.pixelCount);
-      this.dispatch(encoder, "sample_targets", targetCount * EXACT_TARGET_WORKGROUP_SIZE, EXACT_TARGET_WORKGROUP_SIZE);
-      this.dispatch(encoder, "evaluate_candidate", 1, 1);
-      this.dispatch(encoder, "save_best_phase_codes", this.pixelCount);
-      this.dispatch(encoder, "save_best_targets", targetCount, TARGET_WORKGROUP_SIZE);
-    }
-    this.dispatch(encoder, "restore_best_phase_codes", this.pixelCount);
-    this.dispatch(encoder, "restore_best_targets", targetCount, TARGET_WORKGROUP_SIZE);
-    this.dispatch(encoder, "make_final_field", this.pixelCount);
-    this.dispatch(encoder, "sample_targets", targetCount * EXACT_TARGET_WORKGROUP_SIZE, EXACT_TARGET_WORKGROUP_SIZE);
-    this.dispatch(encoder, "clear_support", this.pixelCount);
-    this.dispatch(encoder, "mark_support", 1, 1);
-    this.encodeFft(encoder, this.fftBindGroup, false);
-    this.dispatch(encoder, "reduce_field", this.pixelCount);
-    this.dispatch(encoder, "finish_reduction", 1, 1);
-    const packedWords = this.packedByteLength / 4;
-    this.dispatch(encoder, "pack_active", packedWords);
+    // Keep long, dependent kernels in completed submissions. Dawn/Metal can
+    // otherwise leave commands after a large exact-NUDFT dispatch with stale
+    // storage-buffer state. Reading the score after every real candidate also
+    // lets us stop immediately instead of recomputing an already-converged
+    // field for the rest of the nominal iteration budget.
+    const stateEncoder = this.device.createCommandEncoder({
+      label: `Initialize WGS state ${frame.frameIndex}`,
+    });
+    this.dispatch(stateEncoder, "initialize_targets", targetCount, TARGET_WORKGROUP_SIZE);
+    this.dispatch(stateEncoder, "initialize_optimizer", 1, 1);
+    await this.submitAndWait(stateEncoder);
 
-    const targetStateBytes = targetCount * TARGET_STRIDE;
-    const stateOffset = this.packedByteLength;
-    const summaryOffset = alignTo(stateOffset + targetStateBytes, 4);
-    const optimizerOffset = summaryOffset + 16;
-    const readbackSize = optimizerOffset + 32;
-    const readback = this.device.createBuffer({
-      label: `WGS frame ${frame.frameIndex} readback`,
-      size: readbackSize,
+    const initialPhaseEncoder = this.device.createCommandEncoder({
+      label: `Initialize WGS phase ${frame.frameIndex}`,
+    });
+    this.dispatch(initialPhaseEncoder, "initialize_phase", this.pixelCount);
+    await this.submitAndWait(initialPhaseEncoder);
+
+    await this.encodeQuantizedField(`Quantize initial WGS field ${frame.frameIndex}`);
+    await this.sampleTargetField(frame.frameIndex, targetCount, "initial");
+    let optimizerState = await this.evaluateAndSaveCandidate(frame.frameIndex, targetCount, "initial");
+
+    for (let iteration = 0; iteration < iterations; iteration += 1) {
+      if (optimizerState.currentScore <= 1) break;
+
+      const controlsEncoder = this.device.createCommandEncoder({
+        label: `Update WGS controls ${frame.frameIndex}:${iteration + 1}`,
+      });
+      this.dispatch(controlsEncoder, "update_controls", 1, 1);
+      await this.submitAndWait(controlsEncoder);
+
+      const phaseEncoder = this.device.createCommandEncoder({
+        label: `Synthesize WGS phase ${frame.frameIndex}:${iteration + 1}`,
+      });
+      this.dispatch(phaseEncoder, "synthesize_phase", this.pixelCount);
+      await this.submitAndWait(phaseEncoder);
+
+      await this.encodeQuantizedField(`Quantize WGS field ${frame.frameIndex}:${iteration + 1}`);
+      await this.sampleTargetField(frame.frameIndex, targetCount, `iteration ${iteration + 1}`);
+      optimizerState = await this.evaluateAndSaveCandidate(
+        frame.frameIndex,
+        targetCount,
+        `iteration ${iteration + 1}`,
+      );
+    }
+
+    const exportEncoder = this.device.createCommandEncoder({ label: `Export WGS frame ${frame.frameIndex}` });
+    this.dispatch(exportEncoder, "restore_best_phase_codes", this.pixelCount);
+    const packedWords = this.packedByteLength / 4;
+    this.dispatch(exportEncoder, "pack_active", packedWords);
+
+    // The exported bytes are the scientific source of truth. Read them back
+    // first, then upload those exact bytes for an independent certification
+    // submission. This prevents labels/metrics from ever describing an
+    // internal pre-export code buffer (and also crosses the Dawn/Metal command
+    // buffer boundary that previously produced occasional stale pairings).
+    const frameReadback = this.device.createBuffer({
+      label: `WGS frame ${frame.frameIndex} export readback`,
+      size: this.packedByteLength,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
-    encoder.copyBufferToBuffer(this.buffers.packed!, 0, readback, 0, this.packedByteLength);
-    if (targetStateBytes > 0) {
-      encoder.copyBufferToBuffer(this.buffers.targetState!, 0, readback, stateOffset, targetStateBytes);
-    }
-    encoder.copyBufferToBuffer(this.buffers.summary!, 0, readback, summaryOffset, 16);
-    encoder.copyBufferToBuffer(this.buffers.optimizer!, 0, readback, optimizerOffset, 32);
-    this.device.queue.submit([encoder.finish()]);
+    exportEncoder.copyBufferToBuffer(this.buffers.packed!, 0, frameReadback, 0, this.packedByteLength);
+    this.device.queue.submit([exportEncoder.finish()]);
 
+    let packedSnapshot: ArrayBuffer;
+    let pixels: Uint8Array | Uint16Array;
     try {
-      await readback.mapAsync(GPUMapMode.READ);
-      const mapped = readback.getMappedRange();
-      const snapshot = mapped.slice(0);
-      readback.unmap();
-      const pixels = unpackPixels(
-        snapshot.slice(0, this.packedByteLength),
+      await frameReadback.mapAsync(GPUMapMode.READ);
+      const mapped = frameReadback.getMappedRange();
+      packedSnapshot = mapped.slice(0, this.packedByteLength);
+      frameReadback.unmap();
+      pixels = unpackPixels(
+        packedSnapshot,
         this.activePixelCount,
         this.config.format,
       );
-      const targetStates = parseTargetStates(snapshot, stateOffset, frame);
+    } finally {
+      frameReadback.destroy();
+    }
+
+    this.device.queue.writeBuffer(this.buffers.packed!, 0, packedSnapshot);
+    const certificationSetupEncoder = this.device.createCommandEncoder({
+      label: `Restore exported WGS frame ${frame.frameIndex}`,
+    });
+    this.dispatch(certificationSetupEncoder, "restore_best_targets", targetCount, TARGET_WORKGROUP_SIZE);
+    this.dispatch(certificationSetupEncoder, "unpack_active", this.pixelCount);
+    await this.submitAndWait(certificationSetupEncoder);
+
+    const certificationFieldEncoder = this.device.createCommandEncoder({
+      label: `Build exported WGS field ${frame.frameIndex}`,
+    });
+    this.dispatch(certificationFieldEncoder, "make_final_field", this.pixelCount);
+    await this.submitAndWait(certificationFieldEncoder);
+
+    await this.sampleTargetField(frame.frameIndex, targetCount, "certification");
+
+    const supportEncoder = this.device.createCommandEncoder({
+      label: `Build WGS support mask ${frame.frameIndex}`,
+    });
+    this.dispatch(supportEncoder, "clear_support", this.pixelCount);
+    this.dispatch(supportEncoder, "mark_support", 1, 1);
+    await this.submitAndWait(supportEncoder);
+
+    const fftEncoder = this.device.createCommandEncoder({ label: `Diagnose WGS frame ${frame.frameIndex}` });
+    this.encodeFft(fftEncoder, this.fftBindGroup, false);
+    await this.submitAndWait(fftEncoder);
+
+    const reductionEncoder = this.device.createCommandEncoder({
+      label: `Reduce WGS diagnostics ${frame.frameIndex}`,
+    });
+    this.dispatch(reductionEncoder, "reduce_field", this.pixelCount);
+    await this.submitAndWait(reductionEncoder);
+
+    const targetStateBytes = targetCount * TARGET_STRIDE;
+    const summaryOffset = targetStateBytes;
+    const certificationReadback = this.device.createBuffer({
+      label: `WGS frame ${frame.frameIndex} certification readback`,
+      size: summaryOffset + 16,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+
+    const finishEncoder = this.device.createCommandEncoder({
+      label: `Read certified WGS frame ${frame.frameIndex}`,
+    });
+    this.dispatch(finishEncoder, "finish_reduction", 1, 1);
+    if (targetStateBytes > 0) {
+      finishEncoder.copyBufferToBuffer(
+        this.buffers.targetState!,
+        0,
+        certificationReadback,
+        0,
+        targetStateBytes,
+      );
+    }
+    finishEncoder.copyBufferToBuffer(
+      this.buffers.summary!,
+      0,
+      certificationReadback,
+      summaryOffset,
+      16,
+    );
+    this.device.queue.submit([finishEncoder.finish()]);
+
+    try {
+      await certificationReadback.mapAsync(GPUMapMode.READ);
+      const mapped = certificationReadback.getMappedRange();
+      const snapshot = mapped.slice(0);
+      certificationReadback.unmap();
+      const targetStates = parseTargetStates(snapshot, 0, frame);
       const summary = new DataView(snapshot, summaryOffset, 16);
       const totalPower = summary.getFloat32(0, true);
       const maximumGhostIntensity = targetCount === 0 ? 0 : summary.getFloat32(4, true);
       const displayCodeChange = this.accepted ? summary.getFloat32(8, true) : 0;
-      const optimizer = new DataView(snapshot, optimizerOffset, 32);
-      const performedIterations = Math.max(1, optimizer.getUint32(20, true));
       const metrics = this.evaluateMetrics(
         frame,
         targetStates,
         totalPower,
         maximumGhostIntensity,
         displayCodeChange,
-        performedIterations,
+        Math.max(1, optimizerState.performedIterations),
         started,
       );
       this.candidate = {
@@ -349,7 +451,7 @@ export class WebGpuSequentialWgsSolver implements SequentialHologramBackend {
       };
       return { pixels, metrics };
     } finally {
-      readback.destroy();
+      certificationReadback.destroy();
     }
   }
 
@@ -437,6 +539,7 @@ export class WebGpuSequentialWgsSolver implements SequentialHologramBackend {
       "reduce_field",
       "finish_reduction",
       "pack_active",
+      "unpack_active",
     ];
     const compiled = await Promise.all(names.map(async (name) => [name, await this.device.createComputePipelineAsync({
       label: `WGS ${name}`,
@@ -555,25 +658,102 @@ export class WebGpuSequentialWgsSolver implements SequentialHologramBackend {
     pass.end();
   }
 
+  private async submitAndWait(encoder: GPUCommandEncoder): Promise<void> {
+    this.device.queue.submit([encoder.finish()]);
+    await this.device.queue.onSubmittedWorkDone();
+    this.assertUsable();
+  }
+
+  private async encodeQuantizedField(label: string): Promise<void> {
+    const encoder = this.device.createCommandEncoder({ label });
+    this.dispatch(encoder, "quantize_codes", this.pixelCount);
+    this.dispatch(encoder, "make_final_field", this.pixelCount);
+    await this.submitAndWait(encoder);
+  }
+
+  private async sampleTargetField(frameIndex: number, targetCount: number, round: string): Promise<void> {
+    if (targetCount <= 0) return;
+    const encoder = this.device.createCommandEncoder({
+      label: `Sample WGS targets ${frameIndex}:${round}`,
+    });
+    this.dispatch(
+      encoder,
+      "sample_targets",
+      targetCount * EXACT_TARGET_WORKGROUP_SIZE,
+      EXACT_TARGET_WORKGROUP_SIZE,
+    );
+    await this.submitAndWait(encoder);
+  }
+
+  private async evaluateAndSaveCandidate(
+    frameIndex: number,
+    targetCount: number,
+    round: string,
+  ): Promise<OptimizerSnapshot> {
+    const encoder = this.device.createCommandEncoder({
+      label: `Evaluate WGS candidate ${frameIndex}:${round}`,
+    });
+    this.dispatch(encoder, "evaluate_candidate", 1, 1);
+    this.dispatch(encoder, "save_best_phase_codes", this.pixelCount);
+    this.dispatch(encoder, "save_best_targets", targetCount, TARGET_WORKGROUP_SIZE);
+    encoder.copyBufferToBuffer(this.buffers.optimizer!, 0, this.buffers.optimizerReadback!, 0, 32);
+    this.device.queue.submit([encoder.finish()]);
+
+    const readback = this.buffers.optimizerReadback!;
+    await readback.mapAsync(GPUMapMode.READ);
+    try {
+      const view = new DataView(readback.getMappedRange());
+      return {
+        currentScore: view.getFloat32(0, true),
+        performedIterations: view.getUint32(20, true),
+      };
+    } finally {
+      readback.unmap();
+    }
+  }
+
   private encodeFft(encoder: GPUCommandEncoder, bindGroup: GPUBindGroup, inverse: boolean): void {
-    const pass = encoder.beginComputePass({ label: inverse ? "Inverse 2D FFT" : "Forward 2D FFT" });
-    pass.setPipeline(this.bitReversePipeline);
-    pass.setBindGroup(0, bindGroup, [this.fftParameterOffsets.get("reverse:h")!]);
-    pass.dispatchWorkgroups(Math.ceil(this.pixelCount / WORKGROUP_SIZE));
-    pass.setPipeline(this.fftPipeline);
+    const dispatchStage = (
+      pipeline: GPUComputePipeline,
+      parameterKey: string,
+      invocationCount: number,
+      label: string,
+    ): void => {
+      const pass = encoder.beginComputePass({ label });
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindGroup, [this.fftParameterOffsets.get(parameterKey)!]);
+      pass.dispatchWorkgroups(Math.ceil(invocationCount / WORKGROUP_SIZE));
+      pass.end();
+    };
+    const direction = inverse ? "Inverse" : "Forward";
+    dispatchStage(
+      this.bitReversePipeline,
+      "reverse:h",
+      this.pixelCount,
+      `${direction} FFT horizontal bit reversal`,
+    );
     for (let stage = 1; stage <= this.logWidth; stage += 1) {
-      pass.setBindGroup(0, bindGroup, [this.fftParameterOffsets.get(`butterfly:${inverse ? 1 : 0}:h:${stage}`)!]);
-      pass.dispatchWorkgroups(Math.ceil((this.pixelCount / 2) / WORKGROUP_SIZE));
+      dispatchStage(
+        this.fftPipeline,
+        `butterfly:${inverse ? 1 : 0}:h:${stage}`,
+        this.pixelCount / 2,
+        `${direction} FFT horizontal stage ${stage}`,
+      );
     }
-    pass.setPipeline(this.bitReversePipeline);
-    pass.setBindGroup(0, bindGroup, [this.fftParameterOffsets.get("reverse:v")!]);
-    pass.dispatchWorkgroups(Math.ceil(this.pixelCount / WORKGROUP_SIZE));
-    pass.setPipeline(this.fftPipeline);
+    dispatchStage(
+      this.bitReversePipeline,
+      "reverse:v",
+      this.pixelCount,
+      `${direction} FFT vertical bit reversal`,
+    );
     for (let stage = 1; stage <= this.logHeight; stage += 1) {
-      pass.setBindGroup(0, bindGroup, [this.fftParameterOffsets.get(`butterfly:${inverse ? 1 : 0}:v:${stage}`)!]);
-      pass.dispatchWorkgroups(Math.ceil((this.pixelCount / 2) / WORKGROUP_SIZE));
+      dispatchStage(
+        this.fftPipeline,
+        `butterfly:${inverse ? 1 : 0}:v:${stage}`,
+        this.pixelCount / 2,
+        `${direction} FFT vertical stage ${stage}`,
+      );
     }
-    pass.end();
   }
 
   private serializeFrameParameters(targetCount: number): ArrayBuffer {
@@ -1701,5 +1881,27 @@ fn pack_active(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
   }
   packedOutput[wordIndex] = word;
+}
+
+@compute @workgroup_size(${WORKGROUP_SIZE})
+fn unpack_active(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let index = gid.x;
+  if (index >= params.width * params.height) { return; }
+  let x = index % params.width;
+  let y = index / params.width;
+  if (
+    x < params.xStart || y < params.yStart
+      || x >= params.xStart + params.activeWidth
+      || y >= params.yStart + params.activeHeight
+  ) {
+    codes[index] = 0u;
+    return;
+  }
+  let activeIndex = (y - params.yStart) * params.activeWidth + (x - params.xStart);
+  let pixelsPerWord = select(2u, 4u, params.formatBits == 8u);
+  let part = activeIndex % pixelsPerWord;
+  let word = packedOutput[activeIndex / pixelsPerWord];
+  let mask = select(65535u, 255u, params.formatBits == 8u);
+  codes[index] = (word >> (part * params.formatBits)) & mask;
 }
 `;

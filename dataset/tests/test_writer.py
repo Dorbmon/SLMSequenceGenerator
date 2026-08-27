@@ -116,6 +116,8 @@ def test_configuration_rejects_nonpositive_two_pi_lut(tmp_path: Path) -> None:
 def test_configuration_defaults_to_slmcontrol3_logical_frames(tmp_path: Path) -> None:
     parser = build_argument_parser()
     logical = configuration_from_args(parser.parse_args(["--samples", "1"]))
+    assert logical["solver"]["implementation"] == "webgpu-exact-nudft-export-certified-wgs-v2"
+    assert logical["solver"]["convergenceTolerance"] == pytest.approx(0.02)
     assert logical["lut"] is None
     assert logical["output"] == {
         "pixelFormat": "UINT8",

@@ -1,7 +1,11 @@
 /** Headless Node/Dawn orchestration around the existing WebGPU WGS solver. */
 import type { CalibrationPackage, FrameMetrics, HologramConfig, TrapFrame } from "../../src/types.js";
 import { createOpticalCalibration, type GaussianIncidentBeamInput } from "../../web/src/lib/optical-calibration.js";
-import { inspectWebGpu, WebGpuSequentialWgsSolver } from "../../web/src/lib/webgpu-wgs.js";
+import {
+  inspectWebGpu,
+  WEBGPU_WGS_BACKEND_ID,
+  WebGpuSequentialWgsSolver,
+} from "../../web/src/lib/webgpu-wgs.js";
 import { encodeSamplePayload } from "./protocol.js";
 import {
   deriveSampleSeed,
@@ -62,6 +66,7 @@ interface CollectorConfig {
     incidentBeam?: GaussianIncidentBeamInput;
   };
   solver: {
+    implementation: string;
     targetPhaseMode: string;
     iterations: number;
     maxIterations: number;
@@ -576,6 +581,11 @@ function validateConfig(config: CollectorConfig): void {
   if (config.fftWidth < config.activeWidth || config.fftHeight < config.activeHeight) throw new Error("FFT grid cannot be smaller than the active SLM frame");
   validateOutputAndLut(config);
   if (config.solver.targetPhaseMode !== "REFERENCE_WGS") throw new Error("Dataset solver targetPhaseMode must be REFERENCE_WGS");
+  if (config.solver.implementation !== WEBGPU_WGS_BACKEND_ID) {
+    throw new Error(
+      `Collector requires solver implementation ${WEBGPU_WGS_BACKEND_ID}, got ${String(config.solver.implementation)}`,
+    );
+  }
   if (config.solver.format !== "UINT8") throw new Error("Dataset solver format must be UINT8");
   if (config.solver.requireConvergence !== true) throw new Error("Dataset solver requireConvergence must be true");
   positiveInteger(config.solver.iterations, "solver.iterations");

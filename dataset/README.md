@@ -17,6 +17,10 @@ logical frame under the ideal SLMControl3 compensation model, in the same stable
 order as `positions` and `trap_ids`. This is the solver variable named
 `measuredPhases`; it is not a camera or interferometer measurement.
 Non-converged or numerically invalid candidates are counted but never written.
+Before acceptance, the solver reads back the exported frame bytes, uploads those
+exact bytes again, and independently recomputes target samples and full-plane
+metrics. The exported UINT8 frame—not an internal pre-quantization state—is the
+source of truth for every stored label and metric.
 
 ## Install
 
@@ -59,9 +63,9 @@ Important options:
 --shard-size N                      default: 256
 --min-traps N / --max-traps N       default: 1 / 2000
 --count-distribution log-uniform    default; uniform is also available
---iterations N                      encoded WGS budget, default: 12
+--iterations N                      maximum WGS update budget, default: 12
 --max-iterations N                  hard cap only; no adaptive extension
---convergence-tolerance VALUE       default: 0.001
+--convergence-tolerance VALUE       default: 0.02 (strict maximum amplitude error)
 --dataset-seed UINT32               count/coordinate reproducibility
 --solver-seed UINT32                fixed free-phase WGS seed
 --phase-convention VALUE            override ambiguous LUT absolute range
@@ -75,16 +79,22 @@ Important options:
 
 Run `dataset/generate.py --help` for all optical, sampling, and solver options.
 
-`--iterations` is the work encoded for every solve. Early convergence does not
-shorten the already-recorded WebGPU command buffer, and `--max-iterations` is
-only a hard cap. If one invocation exhausts its retry window, rerunning the
-same command continues with the next deterministic positions. A Dawn/device
-exception stops immediately and does not consume a data-rejection attempt.
+`--iterations` is a maximum update budget. The solver reads back the candidate
+score and stops as soon as the certified tolerance is reached;
+`--max-iterations` remains a hard cap. The default 0.02 tolerance is the strict
+maximum amplitude error over as many as 2000 traps after UINT8 quantization.
+Much smaller values such as 0.001 can be unattainable for dense layouts and will
+legitimately increase rejections. If one invocation exhausts its retry window,
+rerunning the same command continues with the next deterministic positions. A
+Dawn/device exception stops immediately and does not consume a data-rejection
+attempt.
 
 Ctrl+C leaves a flushed `.partial` shard. The identical command resumes it. A
 changed output/LUT mode, LUT, Dawn selection, numerical configuration, or
 sampling configuration requires a new output directory because the
-configuration hash intentionally changes.
+configuration hash intentionally changes. The certified solver implementation
+ID is also part of that hash, preventing pre-certification and certified rows
+from being mixed in one dataset.
 
 ## Frame and LUT modes
 
@@ -174,6 +184,8 @@ dataset/.venv/Scripts/python.exe -m pytest dataset/tests -q
 npm run typecheck
 ```
 
-The end-to-end smoke test uses Node/Dawn D3D12 to generate a real HDF5 shard and
-verifies frame type/shape, CRC, measured phase, convergence flags, zero padding,
-SLMControl3 frame metadata, and manifest checksum.
+The dataset test suite includes a real Node/Dawn solve whose returned UINT8
+frame is checked with an independent direct Fourier calculation for target
+phases, amplitude error, and maximum ghost intensity. Python tests cover HDF5
+shape/type, CRC, convergence flags, zero padding, frame metadata, resume, and
+manifest checksums.

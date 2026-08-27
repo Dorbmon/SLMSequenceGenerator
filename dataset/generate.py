@@ -73,6 +73,7 @@ MAX_METRICS_BYTES = 1 << 20
 MAX_JSON_BODY_BYTES = 1 << 20
 UINT32_MAX = (1 << 32) - 1
 UINT64_MAX = (1 << 64) - 1
+SOLVER_IMPLEMENTATION = "webgpu-exact-nudft-export-certified-wgs-v2"
 
 
 class DatasetError(RuntimeError):
@@ -427,7 +428,15 @@ def build_argument_parser() -> argparse.ArgumentParser:
     solver.add_argument("--epsilon", type=_positive_float, default=1e-8)
     solver.add_argument("--min-weight", type=_positive_float, default=0.1)
     solver.add_argument("--max-weight", type=_positive_float, default=10.0)
-    solver.add_argument("--convergence-tolerance", type=_positive_float, default=1e-3)
+    solver.add_argument(
+        "--convergence-tolerance",
+        type=_positive_float,
+        default=2e-2,
+        help=(
+            "maximum relative trap-amplitude error (default: 0.02; the strict maximum "
+            "over up to 2000 traps, after UINT8 quantization)"
+        ),
+    )
     solver.add_argument("--solver-seed", type=_uint32, default=1)
     solver.add_argument("--background-policy", choices=("ZERO", "PRESERVE"), default="ZERO")
 
@@ -615,6 +624,7 @@ def configuration_from_args(args: argparse.Namespace) -> dict[str, Any]:
             },
         },
         "solver": {
+            "implementation": SOLVER_IMPLEMENTATION,
             "targetPhaseMode": "REFERENCE_WGS",
             "iterations": args.iterations,
             "firstFrameIterations": args.iterations,

@@ -21,4 +21,9 @@ describe("WebGPU WGS resource contract", () => {
     // initialize_phase must read the same buffer before its first NUDFT pass.
     expect(WEBGPU_WGS_PIPELINE_BINDINGS.initialize_phase).toContain(2);
   });
+
+  it("reconstructs certification codes from the exported frame buffer", async () => {
+    const { WEBGPU_WGS_PIPELINE_BINDINGS } = await import("./webgpu-wgs.js");
+    expect(WEBGPU_WGS_PIPELINE_BINDINGS.unpack_active).toEqual([0, 13, 17]);
+  });
 });
