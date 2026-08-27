@@ -20,6 +20,7 @@ const props = defineProps<{
   targetMarkers: readonly TargetMarker[];
   physicalAspectRatio: number;
   viewLabel: string;
+  emptyMessage?: string;
 }>();
 
 const canvas = ref<HTMLCanvasElement | null>(null);
@@ -148,7 +149,11 @@ function drawPlaceholder(context: CanvasRenderingContext2D): void {
   context.fillStyle = "rgba(141,157,149,.66)";
   context.font = "11px 'DM Mono', monospace";
   context.textAlign = "center";
-  context.fillText("UPLOAD AN SLM FRAME TO SIMULATE ITS FOCAL INTENSITY", context.canvas.width / 2, context.canvas.height / 2);
+  context.fillText(
+    props.emptyMessage ?? "UPLOAD AN SLM FRAME TO SIMULATE ITS FOCAL INTENSITY",
+    context.canvas.width / 2,
+    context.canvas.height / 2,
+  );
   context.textAlign = "start";
 }
 

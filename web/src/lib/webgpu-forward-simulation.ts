@@ -5,7 +5,7 @@ import {
   type ForwardSimulationInput,
   type ForwardSimulationResult,
 } from "./forward-simulation.js";
-import { WEBGPU_RADIX2_FFT_SHADER } from "./webgpu-wgs.js";
+import { createWebGpuFft } from "./webgpu-fft.js";
 
 const WORKGROUP_SIZE = 256;
 
@@ -119,11 +119,11 @@ export async function simulateSlmFrameWebGpu(input: ForwardSimulationInput): Pro
       ],
     });
 
-    const fft = await createForwardFft(device, fieldBuffer, input.fftWidth, input.fftHeight);
+    const fft = await createWebGpuFft(device, fieldBuffer, input.fftWidth, input.fftHeight);
     fftParameters = fft.parameterBuffer;
     const encoder = device.createCommandEncoder({ label: "SLM forward simulation" });
     dispatch(encoder, makeFieldPipeline, makeFieldBindings, pixelCount);
-    fft.encode(encoder);
+    fft.encode(encoder, false);
     dispatch(encoder, intensityPipeline, intensityBindings, pixelCount);
     readback = device.createBuffer({
       label: "Forward simulation readback",
@@ -148,99 +148,6 @@ export async function simulateSlmFrameWebGpu(input: ForwardSimulationInput): Pro
   }
 }
 
-interface ForwardFft {
-  parameterBuffer: GPUBuffer;
-  encode(encoder: GPUCommandEncoder): void;
-}
-
-async function createForwardFft(
-  device: GPUDevice,
-  field: GPUBuffer,
-  width: number,
-  height: number,
-): Promise<ForwardFft> {
-  const logWidth = Math.log2(width);
-  const logHeight = Math.log2(height);
-  const alignment = device.limits.minUniformBufferOffsetAlignment;
-  const stride = alignTo(32, alignment);
-  const records: Array<{ key: string; values: number[] }> = [];
-  records.push({ key: "reverse:h", values: [width, height, logWidth, 0, 0, 0, 0, 0] });
-  for (let stage = 1; stage <= logWidth; stage += 1) {
-    records.push({ key: `butterfly:h:${stage}`, values: [width, height, stage, 0, 0, 0, 0, 0] });
-  }
-  records.push({ key: "reverse:v", values: [width, height, logHeight, 0, 1, 0, 0, 0] });
-  for (let stage = 1; stage <= logHeight; stage += 1) {
-    records.push({ key: `butterfly:v:${stage}`, values: [width, height, stage, 0, 1, 0, 0, 0] });
-  }
-  const offsets = new Map<string, number>();
-  const serialized = new Uint8Array(stride * records.length);
-  records.forEach((record, index) => {
-    const offset = index * stride;
-    offsets.set(record.key, offset);
-    const view = new DataView(serialized.buffer, offset, 32);
-    record.values.forEach((value, valueIndex) => view.setUint32(valueIndex * 4, value, true));
-  });
-  const parameterBuffer = device.createBuffer({
-    label: "Forward FFT stage parameters",
-    size: serialized.byteLength,
-    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-  });
-  device.queue.writeBuffer(parameterBuffer, 0, serialized.buffer as ArrayBuffer);
-  const layout = device.createBindGroupLayout({
-    label: "Forward FFT bindings",
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform", hasDynamicOffset: true, minBindingSize: 32 } },
-    ],
-  });
-  const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
-  const module = device.createShaderModule({ label: "Forward radix-2 FFT", code: WEBGPU_RADIX2_FFT_SHADER });
-  const [reversePipeline, butterflyPipeline] = await Promise.all([
-    device.createComputePipelineAsync({
-      label: "Forward FFT bit reversal",
-      layout: pipelineLayout,
-      compute: { module, entryPoint: "bit_reverse" },
-    }),
-    device.createComputePipelineAsync({
-      label: "Forward FFT butterfly",
-      layout: pipelineLayout,
-      compute: { module, entryPoint: "butterfly" },
-    }),
-  ]);
-  const bindGroup = device.createBindGroup({
-    label: "Forward FFT field bindings",
-    layout,
-    entries: [
-      { binding: 0, resource: { buffer: field } },
-      { binding: 1, resource: { buffer: parameterBuffer, size: 32 } },
-    ],
-  });
-  const pixelCount = width * height;
-  return {
-    parameterBuffer,
-    encode(encoder) {
-      const pass = encoder.beginComputePass({ label: "Forward 2D FFT" });
-      pass.setPipeline(reversePipeline);
-      pass.setBindGroup(0, bindGroup, [offsets.get("reverse:h")!]);
-      pass.dispatchWorkgroups(Math.ceil(pixelCount / WORKGROUP_SIZE));
-      pass.setPipeline(butterflyPipeline);
-      for (let stage = 1; stage <= logWidth; stage += 1) {
-        pass.setBindGroup(0, bindGroup, [offsets.get(`butterfly:h:${stage}`)!]);
-        pass.dispatchWorkgroups(Math.ceil((pixelCount / 2) / WORKGROUP_SIZE));
-      }
-      pass.setPipeline(reversePipeline);
-      pass.setBindGroup(0, bindGroup, [offsets.get("reverse:v")!]);
-      pass.dispatchWorkgroups(Math.ceil(pixelCount / WORKGROUP_SIZE));
-      pass.setPipeline(butterflyPipeline);
-      for (let stage = 1; stage <= logHeight; stage += 1) {
-        pass.setBindGroup(0, bindGroup, [offsets.get(`butterfly:v:${stage}`)!]);
-        pass.dispatchWorkgroups(Math.ceil((pixelCount / 2) / WORKGROUP_SIZE));
-      }
-      pass.end();
-    },
-  };
-}
-
 function dispatch(
   encoder: GPUCommandEncoder,
   pipeline: GPUComputePipeline,
@@ -252,10 +159,6 @@ function dispatch(
   pass.setBindGroup(0, bindGroup);
   pass.dispatchWorkgroups(Math.ceil(count / WORKGROUP_SIZE));
   pass.end();
-}
-
-function alignTo(value: number, alignment: number): number {
-  return Math.ceil(value / alignment) * alignment;
 }
 
 const FORWARD_SHADER = /* wgsl */ `

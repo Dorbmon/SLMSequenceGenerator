@@ -13,6 +13,7 @@ import CompilerControls from "./components/CompilerControls.vue";
 import CoordinateWorkspace from "./components/CoordinateWorkspace.vue";
 import { DEFAULT_INITIAL_ATOMS, DEFAULT_TARGET_SITES } from "./data/defaults.js";
 import { cloneAtoms, cloneTargets } from "./lib/coordinates.js";
+import ContinuousFieldPage from "./pages/ContinuousFieldPage.vue";
 import OpticalTweezersPage from "./pages/OpticalTweezersPage.vue";
 import {
   DEFAULT_FOCAL_LENGTH_MM,
@@ -42,6 +43,10 @@ interface OpticalTweezersPageHandle {
   reset(): void;
 }
 
+interface ContinuousFieldPageHandle {
+  reset(): void;
+}
+
 interface LogLine {
   text: string;
   state?: "active" | "done";
@@ -51,8 +56,11 @@ type CompilationState = "idle" | "running" | "accepted" | "warning" | "rejected"
 
 const coordinateEditor = ref<CoordinateEditorHandle | null>(null);
 const opticalTweezersPage = ref<OpticalTweezersPageHandle | null>(null);
+const continuousFieldPage = ref<ContinuousFieldPageHandle | null>(null);
 const activePath = ref(pagePath());
 const isTweezerPage = computed(() => activePath.value === "/tweezers");
+const isContinuousPage = computed(() => activePath.value === "/continuous");
+const isSequencePage = computed(() => activePath.value === "/");
 const initialAtoms = ref<InitialAtom[]>(cloneAtoms(DEFAULT_INITIAL_ATOMS));
 const targetSites = ref<TargetSite[]>(cloneTargets(DEFAULT_TARGET_SITES));
 const sequence = shallowRef<CompiledSequenceHandle | null>(null);
@@ -524,29 +532,39 @@ function reset(): void {
 
 function resetActivePage(): void {
   if (isTweezerPage.value) opticalTweezersPage.value?.reset();
+  else if (isContinuousPage.value) continuousFieldPage.value?.reset();
   else reset();
 }
 
-function pagePath(): "/" | "/tweezers" {
-  return window.location.pathname === "/tweezers" || window.location.pathname.startsWith("/tweezers/") ? "/tweezers" : "/";
+function pagePath(): "/" | "/tweezers" | "/continuous" {
+  if (window.location.pathname === "/tweezers" || window.location.pathname.startsWith("/tweezers/")) return "/tweezers";
+  if (window.location.pathname === "/continuous" || window.location.pathname.startsWith("/continuous/")) return "/continuous";
+  return "/";
 }
 
-function navigate(event: MouseEvent, path: "/" | "/tweezers"): void {
+function pageTitle(path: "/" | "/tweezers" | "/continuous"): string {
+  if (path === "/tweezers") return "Optical Tweezer Frame | SLM Compiler";
+  if (path === "/continuous") return "Continuous Field | SLM Compiler";
+  return "SLM Sequence Compiler";
+}
+
+function navigate(event: MouseEvent, path: "/" | "/tweezers" | "/continuous"): void {
   if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
   event.preventDefault();
   if (activePath.value !== path) window.history.pushState(null, "", path);
   activePath.value = path;
-  document.title = path === "/tweezers" ? "Optical Tweezer Frame | SLM Compiler" : "SLM Sequence Compiler";
+  document.title = pageTitle(path);
   window.scrollTo({ top: 0, behavior: "instant" });
 }
 
 function handlePopState(): void {
   activePath.value = pagePath();
+  document.title = pageTitle(activePath.value);
 }
 
 onMounted(() => {
   window.addEventListener("popstate", handlePopState);
-  document.title = isTweezerPage.value ? "Optical Tweezer Frame | SLM Compiler" : "SLM Sequence Compiler";
+  document.title = pageTitle(activePath.value);
   inspectGpuCapability();
 });
 
@@ -569,14 +587,15 @@ onBeforeUnmount(() => {
         <span>SLM COMPILER</span>
       </a>
       <nav class="page-nav" aria-label="Compiler workspaces">
-        <a href="/" :class="{ 'is-active': !isTweezerPage }" :aria-current="!isTweezerPage ? 'page' : undefined" @click="navigate($event, '/')">Sequence</a>
+        <a href="/" :class="{ 'is-active': isSequencePage }" :aria-current="isSequencePage ? 'page' : undefined" @click="navigate($event, '/')">Sequence</a>
         <a href="/tweezers" :class="{ 'is-active': isTweezerPage }" :aria-current="isTweezerPage ? 'page' : undefined" @click="navigate($event, '/tweezers')">Tweezer frame</a>
+        <a href="/continuous" :class="{ 'is-active': isContinuousPage }" :aria-current="isContinuousPage ? 'page' : undefined" @click="navigate($event, '/continuous')">Continuous field</a>
       </nav>
       <div class="topbar-status"><span class="status-dot"></span> READY / WASM + {{ webgpuAvailable ? "WEBGPU" : "CPU" }}</div>
       <button class="reset-button" type="button" @click="resetActivePage">Reset</button>
     </header>
 
-    <section v-show="!isTweezerPage" class="workspace">
+    <section v-show="isSequencePage" class="workspace">
       <div class="workspace-heading">
         <div>
           <p class="eyebrow">Sequence workspace</p>
@@ -658,6 +677,12 @@ onBeforeUnmount(() => {
     <OpticalTweezersPage
       v-show="isTweezerPage"
       ref="opticalTweezersPage"
+      :webgpu-available="webgpuAvailable"
+      :webgpu-status="webgpuStatus"
+    />
+    <ContinuousFieldPage
+      v-show="isContinuousPage"
+      ref="continuousFieldPage"
       :webgpu-available="webgpuAvailable"
       :webgpu-status="webgpuStatus"
     />

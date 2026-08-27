@@ -80,6 +80,20 @@ normalized intensity field can also be exported as a display BMP or Float32
 raw array. Forward propagation supports both Wasm and a GPU-resident WebGPU
 path.
 
+The `/continuous` workspace synthesizes a phase-only frame from a continuous
+target-intensity raster instead of converting the image into discrete traps.
+It accepts uploaded images and soft-edged freehand drawing, then maps the whole
+raster into an editable, calibrated focal-plane width, height, and centre.
+Mixed-region amplitude freedom (MRAF) constrains the drawn signal window while
+leaving the surrounding noise window free. The Wasm path performs the radix-2
+FFTs in the Rust core; the WebGPU path uploads the target once and keeps every
+forward/inverse iteration, phase-only projection, LUT quantization, and final
+propagation in GPU buffers until one result readback. The displayed
+reconstruction is always recomputed from the final quantized 8-bit codes, so it
+matches the exported indexed grayscale BMP rather than an unquantized solver
+state. Target-fit RMSE, intensity correlation, signal efficiency, and speckle
+contrast remain visible without preventing export of numerically valid frames.
+
 Manually entered focal-plane coordinates are never auto-fitted. Both workspaces expose the laser
 wavelength, Fourier-lens focal length, and SLM pixel pitch and use the physical
 Fraunhofer relation `u = x N p / (lambda f)` (with the image-row sign applied to
@@ -109,12 +123,12 @@ Editable field-centre offsets and a central zero-order guard warning make an
 intentional off-axis carrier placement explicit before the point cloud is
 applied.
 
-Browser calculations run in a dedicated Web Worker. The interface, progress
-animations, navigation, and elapsed-time display remain responsive while Wasm
-is solving, and either sequence compilation or single-frame generation can be
-cancelled immediately.
+Browser calculations run in dedicated Web Workers. The interface, progress
+animation, navigation, and elapsed-time display remain responsive while Wasm
+or WebGPU is solving, and sequence, point-frame, or continuous-field generation
+can be cancelled immediately.
 
-Both workspaces expose a compute-backend selector. Wasm and WebGPU use the same
+Both point-target workspaces expose a compute-backend selector. Wasm and WebGPU use the same
 trap-domain WGS model. It evaluates the unnormalised discrete Fourier sum
 exactly at each requested, potentially fractional trap coordinate; a measured
 phase-precompensation stage separates requested output phases from the internal
@@ -153,7 +167,9 @@ and the default four-trap phase-locked target. They export and decode the indexe
 grayscale BMP, then independently evaluate that decoded phase frame with a
 direct complex Fourier sum. This guards against a backend appearing converged
 under its own sampling approximation while emitting an optically different
-frame.
+frame. A continuous-field regression likewise exports and decodes its BMP and
+requires the decoded codes to reproduce the exact intensity map used for its
+reported quality metrics.
 
 Measured runs must provide a calibration package with a phase-response or
 inverse phase LUT. Set `simulationMode: true` only for the synthetic identity
