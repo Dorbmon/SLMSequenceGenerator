@@ -1767,6 +1767,16 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, format: str, *args: Any) -> None:
+        # A successful POST is emitted for every accepted sample. Printing the
+        # default access log would both flood long runs and split the TTY
+        # progress bar, so retain only HTTP failures for diagnostics.
+        if len(args) >= 2:
+            try:
+                status = int(args[1])
+            except (TypeError, ValueError):
+                status = 0
+            if 200 <= status < 400:
+                return
         sys.stderr.write(f"[collector] {self.address_string()} - {format % args}\n")
 
     def _headers(self, content_length: int, status: int = HTTPStatus.OK) -> None:

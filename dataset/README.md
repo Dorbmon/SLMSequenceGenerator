@@ -45,7 +45,10 @@ dataset/.venv/Scripts/python.exe dataset/generate.py `
 
 The default output is `<repo>/dataset/data`. The Python process starts a
 loopback collector and then starts the Node/Dawn runner automatically. No UI or
-browser interaction is required.
+browser interaction is required. In an interactive terminal, generation uses a
+single-line progress bar showing accepted samples, the current trap count,
+rejections, throughput, and ETA. When output is redirected to a file or CI log,
+progress is automatically reduced to roughly one update per percentage point.
 
 Important options:
 

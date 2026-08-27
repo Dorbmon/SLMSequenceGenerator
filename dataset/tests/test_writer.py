@@ -15,6 +15,7 @@ from dataset.generate import (  # noqa: E402
     DatasetCollector,
     DatasetError,
     DEFAULT_OUTPUT_DIR,
+    CollectorRequestHandler,
     PROTOCOL_MAGIC,
     PROTOCOL_VERSION,
     ProtocolError,
@@ -27,6 +28,19 @@ from dataset.generate import (  # noqa: E402
     parse_sample_payload,
     start_dawn_runner,
 )
+
+
+def test_collector_access_log_suppresses_success_and_keeps_http_errors(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    handler = object.__new__(CollectorRequestHandler)
+    handler.address_string = lambda: "127.0.0.1"  # type: ignore[method-assign]
+
+    handler.log_message('"%s" %s %s', "POST /api/sample", "200", "-")
+    assert capsys.readouterr().err == ""
+
+    handler.log_message('"%s" %s %s', "POST /api/sample", "422", "-")
+    assert '[collector] 127.0.0.1 - "POST /api/sample" 422 -' in capsys.readouterr().err
 
 
 def test_lut_parses_supported_formats_and_rejects_invalid_data(tmp_path: Path) -> None:

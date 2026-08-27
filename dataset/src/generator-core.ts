@@ -150,6 +150,10 @@ let running = false;
 let cancelRequested = false;
 let activeFetch: AbortController | undefined;
 let lastProgress: ProgressSnapshot | null = null;
+const jsonLineMessageSink = (message: unknown): void => {
+  process.stdout.write(`${JSON.stringify(message)}\n`);
+};
+let messageSink: (message: unknown) => void = jsonLineMessageSink;
 
 export async function runDatasetGeneration(collectorUrl: string): Promise<void> {
   if (running) throw new Error("Dawn dataset generation is already running");
@@ -833,9 +837,7 @@ function reportError(error: unknown): void {
 }
 
 function post(message: unknown): void {
-  // JSON Lines keeps the headless runner observable without coupling compute
-  // to a browser UI. Python owns the authoritative manifest/progress state.
-  process.stdout.write(`${JSON.stringify(message)}\n`);
+  messageSink(message);
 }
 
 function allFinite(values: ArrayLike<number>): boolean {
@@ -893,10 +895,16 @@ export function requestDatasetCancellation(): void {
   activeFetch?.abort();
 }
 
+/** Replace JSONL output with a host-specific reporter such as a TTY progress bar. */
+export function setDatasetMessageSink(sink: (message: unknown) => void): void {
+  messageSink = sink;
+}
+
 export function disposeDatasetRuntime(): void {
   solver?.dispose();
   solver = undefined;
   calibration = undefined;
   runtimeFingerprint = "";
   running = false;
+  messageSink = jsonLineMessageSink;
 }

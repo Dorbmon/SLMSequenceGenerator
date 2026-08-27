@@ -1,4 +1,5 @@
 import { create, globals } from "webgpu";
+import { TerminalProgressReporter } from "./progress.js";
 
 interface DawnBootstrapConfig {
   backend: string;
@@ -10,6 +11,7 @@ interface DawnBootstrapConfig {
 }
 
 const collectorUrl = parseCollectorUrl(process.argv.slice(2));
+const reporter = new TerminalProgressReporter(process.stdout);
 const bootstrap = await fetchBootstrapConfig(collectorUrl);
 if (bootstrap.backend !== "DAWN_WEBGPU") {
   throw new Error(`Collector backend must be DAWN_WEBGPU, got ${bootstrap.backend}`);
@@ -31,6 +33,7 @@ Object.defineProperty(globalThis, "navigator", {
 });
 
 const runtime = await import("./generator-core.js");
+runtime.setDatasetMessageSink((message) => reporter.handle(message));
 let signalExitCode: number | undefined;
 const cancelForSignal = (exitCode: number): void => {
   signalExitCode ??= exitCode;
@@ -40,18 +43,20 @@ process.once("SIGINT", () => cancelForSignal(130));
 process.once("SIGTERM", () => cancelForSignal(143));
 
 try {
-  process.stdout.write(`${JSON.stringify({
+  reporter.handle({
     kind: "DAWN_READY",
     options: dawnOptions,
     runtime: "dawn.node",
-  })}\n`);
+  });
   await runtime.runDatasetGeneration(collectorUrl);
   if (signalExitCode !== undefined) process.exitCode = signalExitCode;
 } catch (error) {
+  reporter.finish();
   const normalized = error instanceof Error ? error : new Error(String(error));
   process.stderr.write(`${normalized.stack ?? `${normalized.name}: ${normalized.message}`}\n`);
   process.exitCode = signalExitCode ?? 1;
 } finally {
+  reporter.finish();
   runtime.disposeDatasetRuntime();
   delete (globalThis as { navigator?: unknown }).navigator;
   if (originalNavigator) Object.defineProperty(globalThis, "navigator", originalNavigator);

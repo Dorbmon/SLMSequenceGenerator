@@ -1,0 +1,123 @@
+{
+  "manifestVersion": 1,
+  "schemaVersion": "slm-wgs-hdf5-v1",
+  "protocol": {
+    "magic": "SLMD",
+    "version": 1,
+    "headerBytes": 64,
+    "littleEndian": true
+  },
+  "configurationHash": "76bb98e999ac185331f4b2de497d3d9978250a88c83cdf60019a420cc860b515",
+  "configuration": {
+    "schemaVersion": "slm-wgs-hdf5-v1",
+    "backend": "DAWN_WEBGPU",
+    "requestedSamples": 10,
+    "activeWidth": 1272,
+    "activeHeight": 1024,
+    "fftWidth": 2048,
+    "fftHeight": 1024,
+    "storageMaxTraps": 2000,
+    "shardSize": 10,
+    "compression": "none",
+    "output": {
+      "pixelFormat": "UINT8",
+      "frameMode": "SLMCONTROL3_LOGICAL",
+      "deviceReady": false,
+      "displayReady": true,
+      "lutApplication": "SLMCONTROL3",
+      "slmControl3LutMustBeEnabled": true,
+      "slmControl3LutMustBeDisabled": false,
+      "frameSemantics": "logical 0-255 phase codes; SLMControl3 applies its wavelength-specific LUT"
+    },
+    "targets": {
+      "intensity": 1.0,
+      "inputTargetPhaseRad": 0.0,
+      "phaseLabel": "solver-computed focal-plane phases from the final quantized SLMControl3 logical frame under ideal controller compensation",
+      "positionUnits": "um",
+      "phaseUnits": "rad"
+    },
+    "dawn": {
+      "backend": null,
+      "adapter": null,
+      "options": []
+    },
+    "lut": null,
+    "optics": {
+      "wavelengthNm": 407.0,
+      "focalLengthMm": 100.0,
+      "pixelPitchUm": 12.5,
+      "incidentBeam": {
+        "profile": "GAUSSIAN",
+        "diameterXMm": 8.0,
+        "diameterYMm": 8.0,
+        "centerXMm": 0.0,
+        "centerYMm": 0.0
+      }
+    },
+    "solver": {
+      "targetPhaseMode": "REFERENCE_WGS",
+      "iterations": 12,
+      "firstFrameIterations": 12,
+      "subsequentFrameIterations": 12,
+      "maxIterations": 64,
+      "gamma": 0.85,
+      "epsilon": 1e-08,
+      "minWeight": 0.1,
+      "maxWeight": 10.0,
+      "convergenceTolerance": 0.001,
+      "deterministicSeed": 1,
+      "backgroundPolicy": "ZERO",
+      "oversampling": 1,
+      "qualityGates": {},
+      "requireConvergence": true,
+      "measureSolveTime": true,
+      "format": "UINT8",
+      "independentSamples": true
+    },
+    "sampling": {
+      "minTraps": 1,
+      "maxTraps": 10,
+      "distribution": "log-uniform",
+      "datasetSeed": 1,
+      "minSeparationUm": 6.359375,
+      "fieldFillFraction": 0.9,
+      "xMinUm": -1465.2,
+      "xMaxUm": 1465.2,
+      "yMinUm": -1465.2,
+      "yMaxUm": 1465.2,
+      "zeroOrderGuardUm": 0.0,
+      "maxAttemptsPerPoint": 256,
+      "maxRetriesPerSample": 8
+    },
+    "configHash": "76bb98e999ac185331f4b2de497d3d9978250a88c83cdf60019a420cc860b515"
+  },
+  "createdUtc": "2026-08-27T17:11:03.466151Z",
+  "updatedUtc": "2026-08-27T17:11:05.110773Z",
+  "requestedSamples": 10,
+  "acceptedSamples": 10,
+  "rejectedSamples": 0,
+  "rejectionsByReason": {},
+  "currentSampleRejections": 0,
+  "complete": true,
+  "shards": [
+    {
+      "index": 0,
+      "filename": "shard-00000.h5",
+      "count": 10,
+      "firstSampleId": 0,
+      "lastSampleId": 9,
+      "bytes": 13377844,
+      "sha256": "45971874be2b431524a485ba7fffbfb8f0245934393d369824161b82c3159d3d"
+    }
+  ],
+  "partial": null,
+  "runnerSummary": {
+    "backend": "DAWN_WEBGPU",
+    "backendId": "webgpu-exact-nudft-phase-locked-wgs",
+    "acceptedThisRun": 10,
+    "rejectedThisRun": 0,
+    "runElapsedMs": 1393.103792,
+    "rejectionCounts": {}
+  },
+  "completedUtc": "2026-08-27T17:11:05.110768Z"
+}
