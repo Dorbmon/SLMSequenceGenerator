@@ -17,20 +17,21 @@ import type {
 } from "./types.js";
 import { angularDistance, clamp, crc32, TAU, wrapPhase } from "./util.js";
 import { wasmNudftSampleTargets, wasmNudftSynthesizePhase } from "./wasm-core.js";
+import {
+  WGS_INITIALIZATION_CANCELLATION_RATIO,
+  WGS_LOCKED_PHASE_PRECOMPENSATION_GAIN,
+  WGS_MAX_STABLE_TRAP_AMPLITUDE_GAIN,
+  WGS_REFERENCE_TRAP_AMPLITUDE_GAIN,
+  WGS_SOFT_PHASE_PRECOMPENSATION_GAIN,
+} from "./wgs-constants.js";
 
-// A coherent sum below this fraction has no numerically meaningful phase.
-// Both CPU and GPU use the same seeded fallback so float precision cannot send
-// the non-convex solver into unrelated solutions at destructive cancellations.
-export const WGS_INITIALIZATION_CANCELLATION_RATIO = 1e-3;
-
-// Phase-locked trap coefficients are strongly coupled after the phase-only
-// projection. A large multiplicative WGS step therefore creates a two-cycle.
-// Reference/free-phase WGS follows the measured phase and can safely use the
-// configured feedback gain.
-export const WGS_MAX_STABLE_TRAP_AMPLITUDE_GAIN = 0.1;
-export const WGS_REFERENCE_TRAP_AMPLITUDE_GAIN = 0.85;
-export const WGS_LOCKED_PHASE_PRECOMPENSATION_GAIN = 0.7;
-export const WGS_SOFT_PHASE_PRECOMPENSATION_GAIN = 0.2;
+export {
+  WGS_INITIALIZATION_CANCELLATION_RATIO,
+  WGS_LOCKED_PHASE_PRECOMPENSATION_GAIN,
+  WGS_MAX_STABLE_TRAP_AMPLITUDE_GAIN,
+  WGS_REFERENCE_TRAP_AMPLITUDE_GAIN,
+  WGS_SOFT_PHASE_PRECOMPENSATION_GAIN,
+} from "./wgs-constants.js";
 
 /**
  * Stable pseudo-random target phase used only when the requested target is

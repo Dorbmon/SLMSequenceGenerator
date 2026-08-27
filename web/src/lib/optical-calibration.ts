@@ -1,8 +1,5 @@
-import {
-  mapPhysicalPointToDftFrequency,
-  type CalibrationPackage,
-  type Point2D,
-} from "../../../src/index.js";
+import { mapPhysicalPointToDftFrequency } from "../../../src/coordinates.js";
+import type { CalibrationPackage, Point2D } from "../../../src/types.js";
 
 /** Hardware preset measured from the current Hamamatsu X15213-05 experiment. */
 export const DEFAULT_WAVELENGTH_NM = 407;

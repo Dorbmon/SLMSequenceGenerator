@@ -1,0 +1,25 @@
+{
+  "name": "slm-dawn-dataset-generator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Headless Node/Dawn WebGPU runner for WGS HDF5 dataset generation",
+  "scripts": {
+    "generate": "tsx src/generate.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --config vitest.config.ts"
+  },
+  "dependencies": {
+    "webgpu": "0.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@webgpu/types": "^0.1.72",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

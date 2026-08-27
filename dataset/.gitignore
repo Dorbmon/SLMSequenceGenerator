@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+tests/__pycache__/
+dist/
+node_modules/
+data/
+.smoke-data/
+.dawn-smoke-data/
+.verification/

@@ -1,22 +1,22 @@
+import { mapPhysicalPointToDftFrequency } from "../../../src/coordinates.js";
+import { SlmError } from "../../../src/errors.js";
+import type {
+  CalibrationPackage,
+  FrameMetrics,
+  HologramConfig,
+  HologramSolveResult,
+  SequentialHologramBackend,
+  TrapFrame,
+  TrapState,
+} from "../../../src/types.js";
+import { angularDistance, clamp, wrapPhase } from "../../../src/util.js";
 import {
-  SlmError,
-  angularDistance,
-  clamp,
-  mapPhysicalPointToDftFrequency,
-  type CalibrationPackage,
-  type FrameMetrics,
-  type HologramConfig,
-  type HologramSolveResult,
-  type SequentialHologramBackend,
-  type TrapFrame,
-  type TrapState,
   WGS_INITIALIZATION_CANCELLATION_RATIO,
   WGS_LOCKED_PHASE_PRECOMPENSATION_GAIN,
   WGS_MAX_STABLE_TRAP_AMPLITUDE_GAIN,
   WGS_REFERENCE_TRAP_AMPLITUDE_GAIN,
   WGS_SOFT_PHASE_PRECOMPENSATION_GAIN,
-  wrapPhase,
-} from "../../../src/index.js";
+} from "../../../src/wgs-constants.js";
 
 export const WEBGPU_WGS_BACKEND_ID = "webgpu-exact-nudft-phase-locked-wgs";
 
@@ -351,6 +351,30 @@ export class WebGpuSequentialWgsSolver implements SequentialHologramBackend {
     } finally {
       readback.destroy();
     }
+  }
+
+  /**
+   * Return the target-plane phases that were already included in the latest
+   * solve readback. This accessor performs no additional GPU work and keeps the
+   * numerical WGS pipeline unchanged.
+   */
+  getCandidateMeasuredPhases(frame: TrapFrame): Float32Array {
+    this.assertUsable();
+    const candidate = this.candidate;
+    if (!candidate || candidate.frameIndex !== frame.frameIndex || candidate.targetCount !== frame.traps.length) {
+      throw new SlmError("INVALID_ARGUMENT", "No matching WebGPU hologram candidate is available", {
+        stage: "SOLVING_SLM_FRAMES",
+      });
+    }
+    return Float32Array.from(frame.traps, (trap) => {
+      const phase = candidate.measuredPhases.get(trap.trapId);
+      if (phase === undefined) {
+        throw new SlmError("NUMERIC_ERROR", `The WebGPU result is missing measured phase for trap ${trap.trapId}`, {
+          stage: "SOLVING_SLM_FRAMES",
+        });
+      }
+      return phase;
+    });
   }
 
   commitFrameState(): void {
